@@ -1,6 +1,12 @@
 import axios, { AxiosError } from "axios";
 
-import type { ApiErrorResponse, DocumentAnalysisResponse, DocumentUploadResponse } from "../types/document";
+import type {
+  ApiErrorResponse,
+  DetectionResponse,
+  DocumentAnalysisResponse,
+  DocumentUploadResponse,
+  ProcessResponse,
+} from "../types/document";
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000";
 
@@ -64,4 +70,29 @@ export async function analyzeDocument(documentId: string): Promise<DocumentAnaly
   } catch (error) {
     throw toApiRequestError(error);
   }
+}
+
+export async function detectWatermarks(documentId: string): Promise<DetectionResponse> {
+  try {
+    const response = await apiClient.post<DetectionResponse>(`/api/v1/documents/${documentId}/detect`);
+    return response.data;
+  } catch (error) {
+    throw toApiRequestError(error);
+  }
+}
+
+export async function processDocument(documentId: string, candidateIds: string[]): Promise<ProcessResponse> {
+  try {
+    const response = await apiClient.post<ProcessResponse>(`/api/v1/documents/${documentId}/process`, {
+      candidate_ids: candidateIds,
+      pages: "all",
+    });
+    return response.data;
+  } catch (error) {
+    throw toApiRequestError(error);
+  }
+}
+
+export function downloadUrl(documentId: string): string {
+  return `${API_BASE_URL}/api/v1/documents/${documentId}/download`;
 }

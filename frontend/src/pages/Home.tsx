@@ -1,19 +1,27 @@
-import { CheckCircle2, Loader2, RotateCcw, ShieldCheck } from "lucide-react";
-import { useEffect } from "react";
+import { CheckCircle2, Download, Loader2, RotateCcw, ShieldCheck, Wand2 } from "lucide-react";
+import { useEffect, useState } from "react";
 
 import { AnalysisSummary } from "../components/AnalysisSummary";
+import { CandidateList } from "../components/CandidateList";
 import { ProgressBar } from "../components/ProgressBar";
 import { UploadArea } from "../components/UploadArea";
+import { downloadUrl } from "../services/api";
 import { useDocumentAnalysis } from "../hooks/useDocumentAnalysis";
 import { useDocumentUpload } from "../hooks/useDocumentUpload";
+import { useWatermarkDetection } from "../hooks/useWatermarkDetection";
+import { useWatermarkProcessing } from "../hooks/useWatermarkProcessing";
 import { formatFileSize } from "../utils/validateFile";
 
 export function Home() {
   const { status, progress, result, errorMessage, upload, reset: resetUpload } = useDocumentUpload();
   const { status: analysisStatus, result: analysis, errorMessage: analysisError, analyze, reset: resetAnalysis } = useDocumentAnalysis();
+  const { status: detectionStatus, result: detection, errorMessage: detectionError, detect, reset: resetDetection } = useWatermarkDetection();
+  const { status: processingStatus, result: processing, errorMessage: processingError, process, reset: resetProcessing } = useWatermarkProcessing();
 
-  // Workflow: Upload -> Validate -> Analyze. Once the upload succeeds,
-  // automatically kick off analysis for that document.
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+
+  // Workflow: Upload -> Validate -> Analyze -> Detect. Each step
+  // kicks off automatically once the previous one succeeds.
   useEffect(() => {
     if (status === "success" && result) {
       analyze(result.document_id);
@@ -21,9 +29,42 @@ export function Home() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [status, result]);
 
+  useEffect(() => {
+    if (analysisStatus === "success" && result) {
+      detect(result.document_id);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [analysisStatus, result]);
+
+  useEffect(() => {
+    if (detectionStatus === "success" && detection) {
+      // Pre-select every detected candidate; the user can uncheck
+      // any before confirming removal — nothing is auto-removed.
+      setSelectedIds(new Set(detection.candidates.map((c) => c.candidate_id)));
+    }
+  }, [detectionStatus, detection]);
+
   const reset = () => {
     resetUpload();
     resetAnalysis();
+    resetDetection();
+    resetProcessing();
+    setSelectedIds(new Set());
+  };
+
+  const toggleCandidate = (candidateId: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(candidateId)) next.delete(candidateId);
+      else next.add(candidateId);
+      return next;
+    });
+  };
+
+  const handleRemoveWatermarks = () => {
+    if (result && selectedIds.size > 0) {
+      process(result.document_id, Array.from(selectedIds));
+    }
   };
 
   return (
@@ -99,12 +140,64 @@ export function Home() {
             )}
 
             {analysisStatus === "error" && (
-              <div className="mt-4 rounded-lg bg-warn/5 p-3 text-sm text-warn">
-                Analysis failed: {analysisError}
-              </div>
+              <div className="mt-4 rounded-lg bg-warn/5 p-3 text-sm text-warn">Analysis failed: {analysisError}</div>
             )}
 
             {analysisStatus === "success" && analysis && <AnalysisSummary analysis={analysis} />}
+
+            {detectionStatus === "detecting" && (
+              <div className="mt-4 flex items-center gap-2 text-sm text-ink/60">
+                <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+                Scanning for watermarks…
+              </div>
+            )}
+
+            {detectionStatus === "error" && (
+              <div className="mt-4 rounded-lg bg-warn/5 p-3 text-sm text-warn">Detection failed: {detectionError}</div>
+            )}
+
+            {detectionStatus === "success" && detection && processingStatus !== "success" && (
+              <>
+                <CandidateList candidates={detection.candidates} selectedIds={selectedIds} onToggle={toggleCandidate} />
+
+                {detection.candidates.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={handleRemoveWatermarks}
+                    disabled={selectedIds.size === 0 || processingStatus === "processing"}
+                    className="mt-4 inline-flex items-center gap-2 rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent/90 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {processingStatus === "processing" ? (
+                      <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+                    ) : (
+                      <Wand2 className="h-4 w-4" aria-hidden="true" />
+                    )}
+                    Remove selected watermark{selectedIds.size === 1 ? "" : "s"}
+                  </button>
+                )}
+              </>
+            )}
+
+            {processingStatus === "error" && (
+              <div className="mt-4 rounded-lg bg-warn/5 p-3 text-sm text-warn">Removal failed: {processingError}</div>
+            )}
+
+            {processingStatus === "success" && processing && (
+              <div className="mt-4 rounded-lg border border-accent/30 bg-white p-4">
+                <p className="text-sm font-medium text-ink">
+                  Removed {processing.removed_count} of {processing.requested_count} selected watermark
+                  {processing.requested_count === 1 ? "" : "s"}
+                </p>
+                <p className="mt-1 text-xs text-ink/50">Pages affected: {processing.pages_affected.join(", ") || "none"}</p>
+                <a
+                  href={downloadUrl(result.document_id)}
+                  className="mt-3 inline-flex items-center gap-2 rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent/90 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+                >
+                  <Download className="h-4 w-4" aria-hidden="true" />
+                  Download cleaned PDF
+                </a>
+              </div>
+            )}
 
             <button
               type="button"

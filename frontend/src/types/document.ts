@@ -57,3 +57,31 @@ export interface DocumentAnalysisResponse {
   pages: PageAnalysis[];
 }
 
+export interface WatermarkCandidate {
+  candidate_id: string;
+  type: "text";
+  text: string;
+  page: number;
+  bbox: [number, number, number, number];
+  rotation_degrees: number;
+  confidence: number;
+  reasons: string[];
+}
+
+export interface DetectionResponse {
+  success: true;
+  document_id: string;
+  candidate_count: number;
+  candidates: WatermarkCandidate[];
+}
+
+export interface ProcessResponse {
+  success: true;
+  document_id: string;
+  status: string;
+  requested_count: number;
+  removed_count: number;
+  skipped_candidate_ids: string[];
+  pages_affected: number[];
+}
+
