@@ -23,6 +23,7 @@ class DocumentRecord:
     uploaded_at: datetime
     status: str = "uploaded"
     stored_path: str = ""
+    result_path: str = ""
 
 
 class DocumentStore:
@@ -43,6 +44,12 @@ class DocumentStore:
             record = self._records.get(document_id)
             if record is not None:
                 record.status = status
+
+    def set_result_path(self, document_id: str, result_path: str) -> None:
+        with self._lock:
+            record = self._records.get(document_id)
+            if record is not None:
+                record.result_path = result_path
 
     def delete(self, document_id: str) -> None:
         with self._lock:
@@ -86,3 +93,29 @@ class AnalysisStore:
 
 
 analysis_store = AnalysisStore()
+
+
+class DetectionStore:
+    """
+    Caches the last watermark-candidate list per document, so /process
+    can look up candidates by ID without re-running detection.
+    """
+
+    def __init__(self) -> None:
+        self._results: dict[str, object] = {}
+        self._lock = threading.Lock()
+
+    def set(self, document_id: str, candidates: object) -> None:
+        with self._lock:
+            self._results[document_id] = candidates
+
+    def get(self, document_id: str) -> object | None:
+        with self._lock:
+            return self._results.get(document_id)
+
+    def delete(self, document_id: str) -> None:
+        with self._lock:
+            self._results.pop(document_id, None)
+
+
+detection_store = DetectionStore()
