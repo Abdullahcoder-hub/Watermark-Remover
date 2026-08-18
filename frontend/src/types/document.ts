@@ -28,6 +28,7 @@ export interface TextObject {
 
 export interface ImageObject {
   page: number;
+  xref: number;
   bbox: [number, number, number, number];
   width: number;
   height: number;
@@ -59,13 +60,14 @@ export interface DocumentAnalysisResponse {
 
 export interface WatermarkCandidate {
   candidate_id: string;
-  type: "text";
+  type: "text" | "image";
   text: string;
   page: number;
   bbox: [number, number, number, number];
   rotation_degrees: number;
   confidence: number;
   reasons: string[];
+  xref: number | null;
 }
 
 export interface DetectionResponse {

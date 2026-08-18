@@ -83,6 +83,7 @@ def _extract_images(page: "fitz.Page", page_number: int) -> list[ImageObject]:
         images.append(
             ImageObject(
                 page=page_number,
+                xref=int(image_info.get("xref", 0)),
                 bbox=tuple(round(v, 1) for v in bbox),
                 width=int(image_info.get("width", 0)),
                 height=int(image_info.get("height", 0)),

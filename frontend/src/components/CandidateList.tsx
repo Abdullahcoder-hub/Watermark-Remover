@@ -1,4 +1,4 @@
-import { AlertTriangle } from "lucide-react";
+import { AlertTriangle, FileImage, Type } from "lucide-react";
 
 import type { WatermarkCandidate } from "../types/document";
 
@@ -30,6 +30,8 @@ export function CandidateList({ candidates, selectedIds, onToggle }: CandidateLi
       <div className="space-y-2">
         {candidates.map((candidate) => {
           const badge = confidenceLabel(candidate.confidence);
+          const TypeIcon = candidate.type === "image" ? FileImage : Type;
+          const label = candidate.type === "image" ? candidate.text : `"${candidate.text}"`;
           return (
             <label
               key={candidate.candidate_id}
@@ -43,7 +45,10 @@ export function CandidateList({ candidates, selectedIds, onToggle }: CandidateLi
               />
               <div className="min-w-0 flex-1">
                 <div className="flex items-center justify-between gap-2">
-                  <p className="truncate font-medium text-ink">"{candidate.text}"</p>
+                  <p className="flex min-w-0 items-center gap-1.5 truncate font-medium text-ink">
+                    <TypeIcon className="h-3.5 w-3.5 shrink-0 text-ink/40" aria-hidden="true" />
+                    <span className="truncate">{label}</span>
+                  </p>
                   <span className={`shrink-0 rounded-full px-2 py-0.5 text-xs font-medium ${badge.className}`}>{badge.label}</span>
                 </div>
                 <p className="mt-0.5 text-xs text-ink/50">

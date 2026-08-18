@@ -20,6 +20,7 @@ class TextObject(BaseModel):
 
 class ImageObject(BaseModel):
     page: int
+    xref: int  # PDF cross-reference number; identical images reused across pages share this
     bbox: tuple[float, float, float, float]
     width: int
     height: int

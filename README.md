@@ -2,10 +2,10 @@
 
 Privacy-first watermark removal for PDF documents you own or are authorized to modify.
 
-> **Status: Phase 3** — upload, validation, temporary storage, structural PDF analysis,
-> and text watermark detection + removal (Case A: separate PDF text objects).
-> Image watermark removal, scanned-PDF/OCR handling, and manual selection land in later phases
-> (see `Development Strategy` in the project spec).
+> **Status: Phase 4** — upload, validation, temporary storage, structural PDF analysis,
+> and both text watermark removal (Case A: separate PDF text objects) and image watermark
+> removal (Case B: separate embedded image objects). Manual selection, scanned-PDF/OCR handling,
+> and in-app before/after preview land in later phases (see `Development Strategy` in the project spec).
 
 ## Stack
 
@@ -31,9 +31,9 @@ document-cleaner/
 │   │   ├── config.py     env-driven settings
 │   │   ├── api/          documents.py (upload, analyze, status, detect, process, download), health.py
 │   │   ├── schemas/      Pydantic request/response models (document, analysis, watermark, processing)
-│   │   ├── services/     pdf_analyzer.py, watermark_detector.py, text_remover.py
+│   │   ├── services/     pdf_analyzer.py, watermark_detector.py, text_remover.py, image_remover.py, watermark_remover.py
 │   │   └── utils/        file validation, in-memory document/analysis/detection stores
-│   └── tests/           pytest suite: upload validation, analysis, watermark detection + removal
+│   └── tests/           pytest suite: upload validation, analysis, text + image watermark detection & removal
 ├── docker-compose.yml
 ├── .env.example
 └── .gitignore
@@ -111,23 +111,35 @@ pytest tests/ -v
 
 ## How detection and removal work
 
-- **Detection** (`watermark_detector.py`) scores each text object from Phase 2's analysis using four
-  weighted signals: repeated across multiple pages (+0.4), rotated (+0.3), matches common watermark
-  wording like "CONFIDENTIAL"/"DRAFT"/"SAMPLE" (+0.2), and large relative to the page (+0.1). Nothing
-  is removed automatically — every candidate, however high its confidence, waits for the user to select it.
-- **Removal** (`text_remover.py`) uses PyMuPDF's redaction API restricted to text only
-  (`images=PDF_REDACT_IMAGE_NONE`, `graphics=PDF_REDACT_LINE_ART_NONE`), so images and vector graphics
-  on the page are never touched — matching the spec's Case A requirement to remove the watermark object
-  while preserving the rest of the document.
-- **Known limitation:** PyMuPDF's redaction overlap test uses the axis-aligned bounding box of the
+- **Text detection** (`watermark_detector.py`) scores each text object from Phase 2's analysis using
+  four weighted signals: repeated across multiple pages (+0.4), rotated (+0.3), matches common
+  watermark wording like "CONFIDENTIAL"/"DRAFT"/"SAMPLE" (+0.2), and large relative to the page (+0.1).
+- **Image detection** (same module) scores each embedded image using four analogous signals: the same
+  image (same PDF xref) reused across multiple pages (+0.4), has transparency/alpha (+0.3, typical of
+  watermark overlays), moderate size relative to the page (+0.2), and roughly centered (+0.1). Full-page
+  images are excluded entirely — those are Phase 2's "scanned page" content, not a watermark overlay.
+  Nothing is removed automatically for either type — every candidate, however high its confidence,
+  waits for the user to select it.
+- **Removal** (`watermark_remover.py`) removes a mixed list of text and image candidates in a single
+  PyMuPDF document pass — add every redaction (text quads, image rects) per page, apply once per page,
+  save once at the end. Text removal never touches images (`images=PDF_REDACT_IMAGE_NONE`) and image
+  removal never touches text (`text=PDF_REDACT_TEXT_NONE`); vector graphics are always left alone
+  (`graphics=PDF_REDACT_LINE_ART_NONE`). This matches the spec's Case A and Case B requirement to
+  remove only the watermark object while preserving the rest of the document.
+- **Why a single pass, not two:** an earlier version chained `remove_text_candidates()` into
+  `remove_image_candidates()` by feeding the first step's output into the second. This was verified
+  to corrupt image removal: PyMuPDF's garbage-collecting save renumbers PDF object xrefs, so an image
+  candidate's xref (captured at detection time) silently pointed at the wrong object after the
+  intermediate save. Doing both removals against the same open document, before any save happens,
+  eliminates the issue rather than working around it.
+- **Known limitation:** PyMuPDF's text redaction overlap test uses the axis-aligned bounding box of the
   removed region, not its exact rotated shape. A steeply rotated or oversized watermark whose bounding
   box happens to sweep over nearby body text can take that text with it. This is inherent to
   rectangular/quad-based redaction. The upcoming preview phase will let users visually confirm the
   result before downloading.
 
-## What Phase 3 does NOT do yet
+## What Phase 4 does NOT do yet
 
-- No image watermark detection/removal (Phase 4)
 - No manual region selection (Phase 5)
 - No scanned-PDF / OCR / image restoration (Phase 6)
 - No in-app before/after preview — you have to download to inspect the result (Phase 7 adds this)
@@ -142,7 +154,7 @@ pytest tests/ -v
 - Password-protected PDFs are rejected at upload, and re-checked at analysis and processing time — the
   app does not attempt to bypass passwords or encryption.
 - Analysis and detection are done via PyMuPDF's object-level extraction, not by rasterizing the page.
-  Removal uses text-only redaction and never rewrites images or vector graphics.
+  Removal uses text- and image-scoped redaction only and never rewrites vector graphics.
 - CORS is restricted to the configured frontend origin (never `*`).
 - Internal errors are logged server-side only; the client always receives a generic, safe error message.
 - Uploaded and processed files are not yet auto-deleted — the cleanup worker described in the spec is a later phase.
