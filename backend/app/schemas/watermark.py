@@ -14,13 +14,14 @@ from pydantic import BaseModel
 
 class WatermarkCandidate(BaseModel):
     candidate_id: str
-    type: Literal["text"]  # "image" / "scanned_region" candidates arrive in later phases
-    text: str
+    type: Literal["text", "image"]  # "scanned_region" candidates arrive in a later phase
+    text: str  # for image candidates, a display label like "Image (400x300)"
     page: int
     bbox: tuple[float, float, float, float]
     rotation_degrees: float
     confidence: float
     reasons: list[str]
+    xref: int | None = None  # set for image candidates; used to precisely re-locate/remove the image
 
 
 class DetectionResponse(BaseModel):

@@ -76,12 +76,15 @@ def _closest_quad(page: "fitz.Page", candidate: WatermarkCandidate) -> "fitz.Qua
 
 
 def remove_text_candidates(
-    stored_path: Path,
+    source: Path | bytes,
     candidates: list[WatermarkCandidate],
     pages_filter: set[int] | None,
 ) -> tuple[bytes, list[int], list[str]]:
     """
     Remove the given text watermark candidates from a PDF.
+
+    `source` may be a path to a stored PDF, or raw PDF bytes (used when
+    chaining this after another removal step in the same /process call).
 
     Returns (cleaned_pdf_bytes, pages_affected, skipped_candidate_ids).
     A candidate is skipped (not an error) either because it falls
@@ -103,7 +106,7 @@ def remove_text_candidates(
     skipped_candidate_ids: list[str] = list(out_of_scope_ids)
 
     try:
-        with fitz.open(stored_path) as pdf:
+        with fitz.open(source) if isinstance(source, Path) else fitz.open(stream=source, filetype="pdf") as pdf:
             if pdf.needs_pass:
                 raise RemovalError("PASSWORD_PROTECTED", "This PDF is password-protected and cannot be processed.")
 

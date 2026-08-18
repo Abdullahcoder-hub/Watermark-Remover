@@ -4,8 +4,10 @@ Document upload, analysis, detection, processing, and download endpoints.
 Phase 1: upload + validation + safe temporary storage.
 Phase 2: analysis (text extraction, image detection, scanned-page
 detection) on top of Phase 1's upload flow.
-Phase 3: watermark candidate detection (text only) and removal via
-redaction, plus the download endpoint needed to retrieve the result.
+Phase 3: text watermark candidate detection and removal via redaction,
+plus the download endpoint needed to retrieve the result.
+Phase 4: image watermark candidate detection and removal, combined
+with text removal in a single PyMuPDF pass (see watermark_remover.py).
 """
 import logging
 import re
@@ -20,9 +22,11 @@ from app.schemas.analysis import DocumentAnalysisResponse
 from app.schemas.document import DocumentUploadResponse
 from app.schemas.processing import ProcessRequest, ProcessResponse
 from app.schemas.watermark import DetectionResponse, WatermarkCandidate
+from app.services.image_remover import ImageRemovalError
 from app.services.pdf_analyzer import AnalysisError, analyze_document
-from app.services.text_remover import RemovalError, remove_text_candidates
+from app.services.text_remover import RemovalError
 from app.services.watermark_detector import generate_candidates
+from app.services.watermark_remover import remove_candidates
 from app.utils.document_store import DocumentRecord, analysis_store, detection_store, document_store, utcnow
 from app.utils.file_validation import FileValidationError, generate_document_id, safe_pdf_path, validate_upload
 
@@ -208,10 +212,8 @@ async def process_document(document_id: str, request: ProcessRequest) -> Process
         pages_filter = None  # "all"
 
     try:
-        cleaned_bytes, pages_affected, skipped_ids = remove_text_candidates(
-            Path(record.stored_path), selected, pages_filter
-        )
-    except RemovalError as exc:
+        cleaned_bytes, pages_affected, skipped_ids = remove_candidates(Path(record.stored_path), selected, pages_filter)
+    except (RemovalError, ImageRemovalError) as exc:
         raise _api_error(400, exc.code, exc.message) from exc
 
     result_path = settings.result_path / f"{document_id}.pdf"
