@@ -1,15 +1,18 @@
-import { CheckCircle2, Download, Loader2, RotateCcw, ShieldCheck, Wand2 } from "lucide-react";
+import { CheckCircle2, Download, Loader2, MousePointerSquareDashed, RotateCcw, ShieldCheck, Wand2 } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { AnalysisSummary } from "../components/AnalysisSummary";
 import { CandidateList } from "../components/CandidateList";
+import { ManualSelectionCanvas } from "../components/ManualSelectionCanvas";
 import { ProgressBar } from "../components/ProgressBar";
 import { UploadArea } from "../components/UploadArea";
 import { downloadUrl } from "../services/api";
 import { useDocumentAnalysis } from "../hooks/useDocumentAnalysis";
 import { useDocumentUpload } from "../hooks/useDocumentUpload";
+import { useManualRemoval } from "../hooks/useManualRemoval";
 import { useWatermarkDetection } from "../hooks/useWatermarkDetection";
 import { useWatermarkProcessing } from "../hooks/useWatermarkProcessing";
+import type { ManualRegion } from "../types/document";
 import { formatFileSize } from "../utils/validateFile";
 
 export function Home() {
@@ -17,8 +20,10 @@ export function Home() {
   const { status: analysisStatus, result: analysis, errorMessage: analysisError, analyze, reset: resetAnalysis } = useDocumentAnalysis();
   const { status: detectionStatus, result: detection, errorMessage: detectionError, detect, reset: resetDetection } = useWatermarkDetection();
   const { status: processingStatus, result: processing, errorMessage: processingError, process, reset: resetProcessing } = useWatermarkProcessing();
+  const { status: manualStatus, result: manualResult, errorMessage: manualError, remove: removeManual, reset: resetManual } = useManualRemoval();
 
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [showManualSelection, setShowManualSelection] = useState(false);
 
   // Workflow: Upload -> Validate -> Analyze -> Detect. Each step
   // kicks off automatically once the previous one succeeds.
@@ -49,7 +54,9 @@ export function Home() {
     resetAnalysis();
     resetDetection();
     resetProcessing();
+    resetManual();
     setSelectedIds(new Set());
+    setShowManualSelection(false);
   };
 
   const toggleCandidate = (candidateId: string) => {
@@ -66,6 +73,14 @@ export function Home() {
       process(result.document_id, Array.from(selectedIds));
     }
   };
+
+  const handleManualSubmit = (regions: ManualRegion[], applyToAllPages: boolean) => {
+    if (result) {
+      removeManual(result.document_id, regions, applyToAllPages);
+    }
+  };
+
+  const hasCleanedResult = processingStatus === "success" || manualStatus === "success";
 
   return (
     <div className="mx-auto flex min-h-screen max-w-2xl flex-col px-6 py-16">
@@ -189,24 +204,68 @@ export function Home() {
                   {processing.requested_count === 1 ? "" : "s"}
                 </p>
                 <p className="mt-1 text-xs text-ink/50">Pages affected: {processing.pages_affected.join(", ") || "none"}</p>
-                <a
-                  href={downloadUrl(result.document_id)}
-                  className="mt-3 inline-flex items-center gap-2 rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent/90 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
-                >
-                  <Download className="h-4 w-4" aria-hidden="true" />
-                  Download cleaned PDF
-                </a>
               </div>
             )}
 
-            <button
-              type="button"
-              onClick={reset}
-              className="mt-4 inline-flex items-center gap-2 rounded-lg border border-ink/15 px-4 py-2 text-sm font-medium text-ink hover:bg-ink/5 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
-            >
-              <RotateCcw className="h-4 w-4" aria-hidden="true" />
-              Upload another document
-            </button>
+            {/* Manual selection is always available once a document is
+                uploaded — it's the fallback for anything automatic
+                detection structurally can't see, like a vector-drawn
+                logo rather than an embedded image. */}
+            {result.page_count !== null && (
+              <div className="mt-4">
+                {!showManualSelection ? (
+                  <button
+                    type="button"
+                    onClick={() => setShowManualSelection(true)}
+                    className="inline-flex items-center gap-2 rounded-lg border border-ink/15 px-4 py-2 text-sm font-medium text-ink hover:bg-ink/5 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+                  >
+                    <MousePointerSquareDashed className="h-4 w-4" aria-hidden="true" />
+                    Still see a watermark? Select it manually
+                  </button>
+                ) : (
+                  <ManualSelectionCanvas
+                    documentId={result.document_id}
+                    pageCount={result.page_count}
+                    onSubmit={handleManualSubmit}
+                    isSubmitting={manualStatus === "removing"}
+                  />
+                )}
+
+                {manualStatus === "error" && (
+                  <div className="mt-3 rounded-lg bg-warn/5 p-3 text-sm text-warn">Removal failed: {manualError}</div>
+                )}
+
+                {manualStatus === "success" && manualResult && (
+                  <div className="mt-3 rounded-lg border border-accent/30 bg-white p-4">
+                    <p className="text-sm font-medium text-ink">
+                      Removed {manualResult.regions_applied} manually selected area{manualResult.regions_applied === 1 ? "" : "s"}
+                    </p>
+                    <p className="mt-1 text-xs text-ink/50">Pages affected: {manualResult.pages_affected.join(", ") || "none"}</p>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {hasCleanedResult && (
+              <a
+                href={downloadUrl(result.document_id)}
+                className="mt-4 inline-flex items-center gap-2 rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent/90 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+              >
+                <Download className="h-4 w-4" aria-hidden="true" />
+                Download cleaned PDF
+              </a>
+            )}
+
+            <div>
+              <button
+                type="button"
+                onClick={reset}
+                className="mt-4 inline-flex items-center gap-2 rounded-lg border border-ink/15 px-4 py-2 text-sm font-medium text-ink hover:bg-ink/5 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+              >
+                <RotateCcw className="h-4 w-4" aria-hidden="true" />
+                Upload another document
+              </button>
+            </div>
           </div>
         )}
       </main>
