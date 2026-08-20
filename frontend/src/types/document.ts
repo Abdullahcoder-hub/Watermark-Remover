@@ -87,3 +87,19 @@ export interface ProcessResponse {
   pages_affected: number[];
 }
 
+export interface ManualRegion {
+  page: number;
+  x0: number;
+  y0: number;
+  x1: number;
+  y1: number;
+}
+
+export interface ManualRemovalResponse {
+  success: true;
+  document_id: string;
+  status: string;
+  regions_applied: number;
+  pages_affected: number[];
+}
+

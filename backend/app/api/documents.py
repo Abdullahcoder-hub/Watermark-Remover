@@ -8,6 +8,9 @@ Phase 3: text watermark candidate detection and removal via redaction,
 plus the download endpoint needed to retrieve the result.
 Phase 4: image watermark candidate detection and removal, combined
 with text removal in a single PyMuPDF pass (see watermark_remover.py).
+Phase 5: manual region selection (removes text/image/graphics
+together within a user-drawn box) and the page-preview endpoint that
+makes selection possible without a full preview UI (Phase 7).
 """
 import logging
 import re
@@ -15,14 +18,16 @@ from pathlib import Path
 
 import fitz  # PyMuPDF
 from fastapi import APIRouter, File, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 
 from app.config import settings
 from app.schemas.analysis import DocumentAnalysisResponse
 from app.schemas.document import DocumentUploadResponse
+from app.schemas.manual import ManualRemovalRequest, ManualRemovalResponse
 from app.schemas.processing import ProcessRequest, ProcessResponse
 from app.schemas.watermark import DetectionResponse, WatermarkCandidate
 from app.services.image_remover import ImageRemovalError
+from app.services.manual_remover import ManualRemovalError, remove_manual_regions
 from app.services.pdf_analyzer import AnalysisError, analyze_document
 from app.services.text_remover import RemovalError
 from app.services.watermark_detector import generate_candidates
@@ -40,6 +45,19 @@ MAGIC_BYTES_READ_LENGTH = 8
 
 def _api_error(status_code: int, code: str, message: str) -> HTTPException:
     return HTTPException(status_code=status_code, detail={"success": False, "error": {"code": code, "message": message}})
+
+
+def _current_source_path(record: "DocumentRecord") -> Path:
+    """
+    The most up-to-date version of a document: its processed result if
+    any automatic or manual removal has already run, otherwise the
+    original upload. Every removal step (automatic /process, manual
+    /manual-remove) and /preview all read from this, so they compose
+    correctly instead of one silently overwriting the other's work.
+    """
+    if record.result_path and Path(record.result_path).exists():
+        return Path(record.result_path)
+    return Path(record.stored_path)
 
 
 @router.post("/upload", response_model=DocumentUploadResponse)
@@ -212,7 +230,7 @@ async def process_document(document_id: str, request: ProcessRequest) -> Process
         pages_filter = None  # "all"
 
     try:
-        cleaned_bytes, pages_affected, skipped_ids = remove_candidates(Path(record.stored_path), selected, pages_filter)
+        cleaned_bytes, pages_affected, skipped_ids = remove_candidates(_current_source_path(record), selected, pages_filter)
     except (RemovalError, ImageRemovalError) as exc:
         raise _api_error(400, exc.code, exc.message) from exc
 
@@ -266,4 +284,75 @@ async def download_document(document_id: str) -> FileResponse:
         path=record.result_path,
         media_type="application/pdf",
         filename=_safe_download_filename(record.original_filename),
+    )
+
+
+# 150 DPI keeps preview images legible for manual selection without
+# being large enough to slow down the page-image round trip.
+PREVIEW_DPI = 150
+
+
+@router.get("/{document_id}/preview/{page_number}")
+async def preview_page(document_id: str, page_number: int) -> Response:
+    record = document_store.get(document_id)
+    if record is None:
+        raise _api_error(404, "DOCUMENT_NOT_FOUND", "No document was found with that ID.")
+
+    source_path = _current_source_path(record)
+
+    try:
+        with fitz.open(source_path) as pdf:
+            if page_number < 1 or page_number > pdf.page_count:
+                raise _api_error(400, "INVALID_PAGE", f"This document has {pdf.page_count} pages.")
+            page = pdf[page_number - 1]
+            zoom = PREVIEW_DPI / 72
+            pixmap = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom))
+            png_bytes = pixmap.tobytes("png")
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 - any PyMuPDF failure means the file couldn't be rendered
+        logger.error("preview_failed job_id=%s page=%s", document_id, page_number)
+        raise _api_error(500, "PREVIEW_FAILED", "This page could not be rendered.") from exc
+
+    return Response(content=png_bytes, media_type="image/png")
+
+
+@router.post("/{document_id}/manual-remove", response_model=ManualRemovalResponse)
+async def manual_remove(document_id: str, request: ManualRemovalRequest) -> ManualRemovalResponse:
+    record = document_store.get(document_id)
+    if record is None:
+        raise _api_error(404, "DOCUMENT_NOT_FOUND", "No document was found with that ID.")
+
+    for region in request.regions:
+        if region.x1 <= region.x0 or region.y1 <= region.y0:
+            raise _api_error(400, "INVALID_REGION", "Each region's x1/y1 must be greater than its x0/y0.")
+
+    source_path = _current_source_path(record)
+
+    try:
+        cleaned_bytes, pages_affected = remove_manual_regions(source_path, request.regions, request.apply_to_all_pages)
+    except ManualRemovalError as exc:
+        raise _api_error(400, exc.code, exc.message) from exc
+
+    result_path = settings.result_path / f"{document_id}.pdf"
+    try:
+        result_path.write_bytes(cleaned_bytes)
+    except OSError as exc:
+        logger.error("manual_remove_write_failed job_id=%s", document_id)
+        raise _api_error(500, "STORAGE_ERROR", "The cleaned file could not be saved. Please try again.") from exc
+
+    document_store.set_result_path(document_id, str(result_path))
+    document_store.set_status(document_id, "processed")
+
+    logger.info(
+        "manual_remove_success job_id=%s regions=%s pages_affected=%s",
+        document_id,
+        len(request.regions),
+        pages_affected,
+    )
+
+    return ManualRemovalResponse(
+        document_id=document_id,
+        regions_applied=len(request.regions),
+        pages_affected=pages_affected,
     )

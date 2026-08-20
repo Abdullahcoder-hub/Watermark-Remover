@@ -5,6 +5,8 @@ import type {
   DetectionResponse,
   DocumentAnalysisResponse,
   DocumentUploadResponse,
+  ManualRegion,
+  ManualRemovalResponse,
   ProcessResponse,
 } from "../types/document";
 
@@ -95,4 +97,24 @@ export async function processDocument(documentId: string, candidateIds: string[]
 
 export function downloadUrl(documentId: string): string {
   return `${API_BASE_URL}/api/v1/documents/${documentId}/download`;
+}
+
+export function previewUrl(documentId: string, page: number): string {
+  return `${API_BASE_URL}/api/v1/documents/${documentId}/preview/${page}`;
+}
+
+export async function manualRemove(
+  documentId: string,
+  regions: ManualRegion[],
+  applyToAllPages: boolean,
+): Promise<ManualRemovalResponse> {
+  try {
+    const response = await apiClient.post<ManualRemovalResponse>(`/api/v1/documents/${documentId}/manual-remove`, {
+      regions,
+      apply_to_all_pages: applyToAllPages,
+    });
+    return response.data;
+  } catch (error) {
+    throw toApiRequestError(error);
+  }
 }
