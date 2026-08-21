@@ -103,3 +103,15 @@ export interface ManualRemovalResponse {
   pages_affected: number[];
 }
 
+export interface OcrPageResult {
+  page: number;
+  words_added: number;
+}
+
+export interface OcrResponse {
+  success: true;
+  document_id: string;
+  status: string;
+  pages_ocred: OcrPageResult[];
+}
+

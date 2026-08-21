@@ -30,15 +30,15 @@ export function AnalysisSummary({ analysis }: AnalysisSummaryProps) {
       </div>
 
       {analysis.appears_scanned && (
-        <div className="mt-3 flex items-start gap-2 rounded-lg bg-warn/5 p-3 text-sm text-warn">
+        <div className="mt-3 flex items-start gap-2 rounded-lg bg-ink/[0.03] p-3 text-sm text-ink/60">
           <FileWarning className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
-          <p>This document looks like a scanned image rather than searchable text. Watermark removal for scanned pages arrives in a later phase.</p>
+          <p>
+            This document looks like a scanned image rather than searchable text. Manual selection on
+            this page will restore the area with inpainting instead of leaving a blank patch, and you
+            can run OCR below to make the text searchable.
+          </p>
         </div>
       )}
-
-      <p className="mt-3 text-xs text-ink/40">
-        Watermark detection isn't implemented yet — this is Phase 2 (structural analysis only).
-      </p>
     </div>
   );
 }

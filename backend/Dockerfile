@@ -2,10 +2,14 @@ FROM python:3.14-slim
 
 WORKDIR /app
 
-# System deps needed by later phases (OpenCV/Tesseract) are added when
-# those phases land — kept minimal for Phase 1.
+# libgl1 is needed by OpenCV; tesseract-ocr provides the OCR engine
+# pytesseract shells out to (Phase 6). tesseract-ocr-eng is the English
+# language pack — add more tesseract-ocr-<lang> packages here if the
+# app needs to OCR other languages.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libgl1 \
+    tesseract-ocr \
+    tesseract-ocr-eng \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .

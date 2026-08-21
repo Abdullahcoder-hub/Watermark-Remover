@@ -7,6 +7,7 @@ import type {
   DocumentUploadResponse,
   ManualRegion,
   ManualRemovalResponse,
+  OcrResponse,
   ProcessResponse,
 } from "../types/document";
 
@@ -113,6 +114,20 @@ export async function manualRemove(
       regions,
       apply_to_all_pages: applyToAllPages,
     });
+    return response.data;
+  } catch (error) {
+    throw toApiRequestError(error);
+  }
+}
+
+export async function runOcr(documentId: string): Promise<OcrResponse> {
+  try {
+    // OCR can take a while on larger scans — give it more room than the default.
+    const response = await apiClient.post<OcrResponse>(
+      `/api/v1/documents/${documentId}/ocr`,
+      {},
+      { timeout: 120_000 },
+    );
     return response.data;
   } catch (error) {
     throw toApiRequestError(error);
