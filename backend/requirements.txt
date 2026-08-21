@@ -7,9 +7,14 @@ pydantic-settings==2.15.0
 python-multipart==0.0.32
 PyMuPDF==1.26.0
 
-# Phase 2+ (not required yet — kept here so the environment doesn't
-# need to be rebuilt when later phases add analysis/processing):
-# opencv-python-headless==4.10.0.84
-# Pillow==12.1.1
-# pytesseract==0.3.13
+# Phase 6 — scanned page handling (inpainting + OCR)
+opencv-python-headless==4.13.0.92
+numpy==2.4.4
+pytesseract==0.3.13
+Pillow==12.1.1
+
+# ocrmypdf and its heavier system-tool dependencies (Ghostscript, qpdf)
+# are not used — OCR is implemented directly via pytesseract + PyMuPDF
+# invisible-text insertion (see app/services/ocr_service.py) for a
+# lighter, more controllable toolchain. Kept here for reference only:
 # ocrmypdf==16.6.0

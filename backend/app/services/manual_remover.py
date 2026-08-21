@@ -1,25 +1,40 @@
 """
-Manual watermark removal (Phase 5).
+Manual watermark removal (Phase 5, extended in Phase 6 for scanned pages).
 
 Unlike the scored, type-scoped automatic detectors, manual selection
 is intentionally blunt: the user has visually confirmed a region, so
-everything inside it — text, raster images, and vector graphics — is
-removed together. This is what catches watermarks the automatic
-detectors structurally cannot see, such as a logo drawn with vector
-paths rather than an embedded image (confirmed by direct reproduction:
-a CamScanner-style "icon" drawn via page.new_shape() has no xref and
-is invisible to the Phase 4 image detector).
+everything inside it should go. But *how* it's removed depends on the
+page:
+
+- Normal pages (Case A/B): redact the region — text, raster images,
+  and vector graphics inside the box are deleted via PyMuPDF redaction.
+- Scanned pages (Case C): redaction is unsafe here. Verified directly —
+  a redaction box that only partially overlaps a full-page image
+  deletes the ENTIRE image object, not just the covered pixels. Since
+  a scanned page's "image" IS the page's content, that would destroy
+  the whole page over a small watermark stamp. Instead, the selected
+  region is masked and filled with OpenCV inpainting (see
+  inpainting.py), and the restored image replaces the original at the
+  same xref -- everything else about the page is untouched.
+
+Both paths run inside the same PyMuPDF document pass (one open, one
+save), for the same reason Phase 4's combined remover does: an
+intermediate garbage-collecting save renumbers xrefs, which would
+break the scanned-page path's xref lookups if it ran as a second,
+separate pass over already-saved bytes.
 """
+from collections import defaultdict
 from pathlib import Path
 
 import fitz  # PyMuPDF
 
 from app.schemas.manual import ManualRegion
+from app.services.inpainting import InpaintingError, build_mask, decode_image, encode_png, inpaint
 
 _TEXT_REMOVE = fitz.PDF_REDACT_TEXT_REMOVE
 _IMAGES_REMOVE = fitz.PDF_REDACT_IMAGE_REMOVE
 # "if touched" (not "if covered") because a manually drawn box is a
-# deliberate, explicit selection — any graphics the box overlaps
+# deliberate, explicit selection -- any graphics the box overlaps
 # should go, not only ones fully enclosed by it.
 _GRAPHICS_REMOVE = fitz.PDF_REDACT_LINE_ART_REMOVE_IF_TOUCHED
 
@@ -42,19 +57,49 @@ def _regions_for_document(regions: list[ManualRegion], page_count: int, apply_to
     return expanded
 
 
+def _redact_page(page: "fitz.Page", regions: list[ManualRegion], page_width: float, page_height: float) -> None:
+    for region in regions:
+        rect = fitz.Rect(
+            region.x0 * page_width,
+            region.y0 * page_height,
+            region.x1 * page_width,
+            region.y1 * page_height,
+        )
+        if rect.is_empty:
+            continue
+        page.add_redact_annot(rect, fill=None)
+    page.apply_redactions(images=_IMAGES_REMOVE, graphics=_GRAPHICS_REMOVE, text=_TEXT_REMOVE)
+
+
+def _inpaint_page(pdf: "fitz.Document", page: "fitz.Page", xref: int, regions: list[ManualRegion]) -> None:
+    base = pdf.extract_image(xref)
+    image = decode_image(base["image"])
+    height, width = image.shape[:2]
+
+    mask = build_mask((height, width), [(r.x0, r.y0, r.x1, r.y1) for r in regions])
+    restored = inpaint(image, mask)
+    restored_bytes = encode_png(restored)
+    page.replace_image(xref, stream=restored_bytes)
+
+
 def remove_manual_regions(
     source: Path | bytes,
     regions: list[ManualRegion],
     apply_to_all_pages: bool,
+    scanned_pages: dict[int, int] | None = None,
 ) -> tuple[bytes, list[int]]:
     """
     Remove everything inside each manually-selected region.
 
     `source` may be a path to a stored PDF, or raw PDF bytes (used when
     chaining after an earlier automatic-removal step).
+    `scanned_pages` maps page_number -> xref for pages the caller has
+    identified as scanned (see scanned_detector.py); those pages are
+    inpainted instead of redacted. Pages not in this map use redaction.
 
     Returns (cleaned_pdf_bytes, pages_affected).
     """
+    scanned_pages = scanned_pages or {}
     pages_affected: list[int] = []
 
     try:
@@ -64,38 +109,28 @@ def remove_manual_regions(
 
             all_regions = _regions_for_document(regions, pdf.page_count, apply_to_all_pages)
 
-            regions_by_page: dict[int, list[ManualRegion]] = {}
-            invalid_pages: set[int] = set()
+            regions_by_page: dict[int, list[ManualRegion]] = defaultdict(list)
             for region in all_regions:
                 if region.page < 1 or region.page > pdf.page_count:
-                    invalid_pages.add(region.page)
                     continue
-                regions_by_page.setdefault(region.page, []).append(region)
+                regions_by_page[region.page].append(region)
 
             if not regions_by_page:
                 raise ManualRemovalError("INVALID_PAGE", f"No valid pages in the selection (document has {pdf.page_count} pages).")
 
             for page_number, page_regions in regions_by_page.items():
                 page = pdf[page_number - 1]
-                page_width, page_height = page.rect.width, page.rect.height
 
-                for region in page_regions:
-                    rect = fitz.Rect(
-                        region.x0 * page_width,
-                        region.y0 * page_height,
-                        region.x1 * page_width,
-                        region.y1 * page_height,
-                    )
-                    if rect.is_empty:
-                        continue
-                    page.add_redact_annot(rect, fill=None)
+                if page_number in scanned_pages:
+                    _inpaint_page(pdf, page, scanned_pages[page_number], page_regions)
+                else:
+                    _redact_page(page, page_regions, page.rect.width, page.rect.height)
 
-                page.apply_redactions(images=_IMAGES_REMOVE, graphics=_GRAPHICS_REMOVE, text=_TEXT_REMOVE)
                 pages_affected.append(page_number)
 
             cleaned_bytes = pdf.tobytes(garbage=4, deflate=True)
-    except ManualRemovalError:
-        raise
+    except (ManualRemovalError, InpaintingError) as exc:
+        raise ManualRemovalError(exc.code, exc.message) from exc
     except Exception as exc:  # noqa: BLE001 - any PyMuPDF failure means the file couldn't be processed
         raise ManualRemovalError("PROCESSING_FAILED", "The document could not be processed.") from exc
 

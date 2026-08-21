@@ -1,4 +1,4 @@
-import { CheckCircle2, Download, Loader2, MousePointerSquareDashed, RotateCcw, ShieldCheck, Wand2 } from "lucide-react";
+import { CheckCircle2, Download, Loader2, MousePointerSquareDashed, RotateCcw, ScanText, ShieldCheck, Wand2 } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { AnalysisSummary } from "../components/AnalysisSummary";
@@ -10,6 +10,7 @@ import { downloadUrl } from "../services/api";
 import { useDocumentAnalysis } from "../hooks/useDocumentAnalysis";
 import { useDocumentUpload } from "../hooks/useDocumentUpload";
 import { useManualRemoval } from "../hooks/useManualRemoval";
+import { useOcr } from "../hooks/useOcr";
 import { useWatermarkDetection } from "../hooks/useWatermarkDetection";
 import { useWatermarkProcessing } from "../hooks/useWatermarkProcessing";
 import type { ManualRegion } from "../types/document";
@@ -21,6 +22,7 @@ export function Home() {
   const { status: detectionStatus, result: detection, errorMessage: detectionError, detect, reset: resetDetection } = useWatermarkDetection();
   const { status: processingStatus, result: processing, errorMessage: processingError, process, reset: resetProcessing } = useWatermarkProcessing();
   const { status: manualStatus, result: manualResult, errorMessage: manualError, remove: removeManual, reset: resetManual } = useManualRemoval();
+  const { status: ocrStatus, result: ocrResult, errorMessage: ocrError, ocr, reset: resetOcr } = useOcr();
 
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [showManualSelection, setShowManualSelection] = useState(false);
@@ -55,6 +57,7 @@ export function Home() {
     resetDetection();
     resetProcessing();
     resetManual();
+    resetOcr();
     setSelectedIds(new Set());
     setShowManualSelection(false);
   };
@@ -80,7 +83,13 @@ export function Home() {
     }
   };
 
-  const hasCleanedResult = processingStatus === "success" || manualStatus === "success";
+  const handleRunOcr = () => {
+    if (result) {
+      ocr(result.document_id);
+    }
+  };
+
+  const hasCleanedResult = processingStatus === "success" || manualStatus === "success" || ocrStatus === "success";
 
   return (
     <div className="mx-auto flex min-h-screen max-w-2xl flex-col px-6 py-16">
@@ -159,6 +168,40 @@ export function Home() {
             )}
 
             {analysisStatus === "success" && analysis && <AnalysisSummary analysis={analysis} />}
+
+            {analysisStatus === "success" && analysis?.appears_scanned && ocrStatus !== "success" && (
+              <div className="mt-4 rounded-lg border border-ink/10 bg-white p-4">
+                <p className="text-sm font-medium text-ink">This document looks scanned</p>
+                <p className="mt-1 text-xs text-ink/50">
+                  Its text isn't selectable or searchable yet. Run OCR to add a searchable text layer —
+                  the page will look exactly the same.
+                </p>
+                <button
+                  type="button"
+                  onClick={handleRunOcr}
+                  disabled={ocrStatus === "running"}
+                  className="mt-3 inline-flex items-center gap-2 rounded-lg border border-ink/15 px-4 py-2 text-sm font-medium text-ink hover:bg-ink/5 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {ocrStatus === "running" ? (
+                    <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+                  ) : (
+                    <ScanText className="h-4 w-4" aria-hidden="true" />
+                  )}
+                  Make this document searchable (OCR)
+                </button>
+                {ocrStatus === "error" && <p className="mt-2 text-sm text-warn">OCR failed: {ocrError}</p>}
+              </div>
+            )}
+
+            {ocrStatus === "success" && ocrResult && (
+              <div className="mt-4 rounded-lg border border-accent/30 bg-white p-4">
+                <p className="text-sm font-medium text-ink">Document is now searchable</p>
+                <p className="mt-1 text-xs text-ink/50">
+                  {ocrResult.pages_ocred.reduce((sum, p) => sum + p.words_added, 0)} words recognized across{" "}
+                  {ocrResult.pages_ocred.length} page{ocrResult.pages_ocred.length === 1 ? "" : "s"}.
+                </p>
+              </div>
+            )}
 
             {detectionStatus === "detecting" && (
               <div className="mt-4 flex items-center gap-2 text-sm text-ink/60">

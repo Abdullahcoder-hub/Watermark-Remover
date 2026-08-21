@@ -11,6 +11,9 @@ with text removal in a single PyMuPDF pass (see watermark_remover.py).
 Phase 5: manual region selection (removes text/image/graphics
 together within a user-drawn box) and the page-preview endpoint that
 makes selection possible without a full preview UI (Phase 7).
+Phase 6: scanned-page handling — manual selection now inpaints
+(instead of redacts) on scanned pages, and a new /ocr endpoint adds a
+searchable text layer to scanned pages on request.
 """
 import logging
 import re
@@ -24,11 +27,14 @@ from app.config import settings
 from app.schemas.analysis import DocumentAnalysisResponse
 from app.schemas.document import DocumentUploadResponse
 from app.schemas.manual import ManualRemovalRequest, ManualRemovalResponse
+from app.schemas.ocr import OcrPageResult, OcrRequest, OcrResponse
 from app.schemas.processing import ProcessRequest, ProcessResponse
 from app.schemas.watermark import DetectionResponse, WatermarkCandidate
 from app.services.image_remover import ImageRemovalError
 from app.services.manual_remover import ManualRemovalError, remove_manual_regions
+from app.services.ocr_service import OcrError, add_ocr_text_layer
 from app.services.pdf_analyzer import AnalysisError, analyze_document
+from app.services.scanned_detector import scanned_page_xrefs
 from app.services.text_remover import RemovalError
 from app.services.watermark_detector import generate_candidates
 from app.services.watermark_remover import remove_candidates
@@ -52,12 +58,29 @@ def _current_source_path(record: "DocumentRecord") -> Path:
     The most up-to-date version of a document: its processed result if
     any automatic or manual removal has already run, otherwise the
     original upload. Every removal step (automatic /process, manual
-    /manual-remove) and /preview all read from this, so they compose
-    correctly instead of one silently overwriting the other's work.
+    /manual-remove, /ocr) and /preview all read from this, so they
+    compose correctly instead of one silently overwriting the other's
+    work.
     """
     if record.result_path and Path(record.result_path).exists():
         return Path(record.result_path)
     return Path(record.stored_path)
+
+
+def _get_or_run_analysis(document_id: str, record: "DocumentRecord") -> DocumentAnalysisResponse:
+    """
+    Analysis is cached from /analyze or /detect, but several Phase 6
+    endpoints need it too (to know which pages are scanned) and
+    shouldn't force the caller to sequence an extra request first.
+    """
+    analysis = analysis_store.get(document_id)
+    if analysis is None:
+        try:
+            analysis = analyze_document(document_id, _current_source_path(record))
+        except AnalysisError as exc:
+            raise _api_error(400, exc.code, exc.message) from exc
+        analysis_store.set(document_id, analysis)
+    return analysis  # type: ignore[return-value]
 
 
 @router.post("/upload", response_model=DocumentUploadResponse)
@@ -243,6 +266,10 @@ async def process_document(document_id: str, request: ProcessRequest) -> Process
 
     document_store.set_result_path(document_id, str(result_path))
     document_store.set_status(document_id, "processed")
+    # The document changed and any prior save renumbers PDF xrefs
+    # document-wide; cached analysis (image xrefs especially) is no
+    # longer trustworthy against the new bytes.
+    analysis_store.delete(document_id)
 
     all_skipped = sorted(set(skipped_ids) | set(unknown_ids))
     removed_count = len(request.candidate_ids) - len(all_skipped)
@@ -329,8 +356,23 @@ async def manual_remove(document_id: str, request: ManualRemovalRequest) -> Manu
 
     source_path = _current_source_path(record)
 
+    # Scanned-page xrefs must come from a FRESH analysis of the exact
+    # bytes we're about to inpaint, not the cached analysis_store
+    # value. Any prior /process or /manual-remove call resaves the
+    # whole document with garbage collection, which renumbers PDF
+    # xrefs document-wide — including for pages that call didn't even
+    # touch. A stale cached xref would silently target the wrong
+    # image (or none at all).
     try:
-        cleaned_bytes, pages_affected = remove_manual_regions(source_path, request.regions, request.apply_to_all_pages)
+        fresh_analysis = analyze_document(document_id, source_path)
+    except AnalysisError as exc:
+        raise _api_error(400, exc.code, exc.message) from exc
+    scanned_pages = scanned_page_xrefs(fresh_analysis)
+
+    try:
+        cleaned_bytes, pages_affected = remove_manual_regions(
+            source_path, request.regions, request.apply_to_all_pages, scanned_pages
+        )
     except ManualRemovalError as exc:
         raise _api_error(400, exc.code, exc.message) from exc
 
@@ -343,16 +385,66 @@ async def manual_remove(document_id: str, request: ManualRemovalRequest) -> Manu
 
     document_store.set_result_path(document_id, str(result_path))
     document_store.set_status(document_id, "processed")
+    # The just-used analysis reflects pre-edit content; invalidate the
+    # cache so a subsequent /detect or /manual-remove call re-derives
+    # fresh state instead of reasoning about content that's now gone.
+    analysis_store.delete(document_id)
 
     logger.info(
-        "manual_remove_success job_id=%s regions=%s pages_affected=%s",
+        "manual_remove_success job_id=%s regions=%s pages_affected=%s scanned_pages_used=%s",
         document_id,
         len(request.regions),
         pages_affected,
+        sorted(set(pages_affected) & scanned_pages.keys()),
     )
 
     return ManualRemovalResponse(
         document_id=document_id,
         regions_applied=len(request.regions),
         pages_affected=pages_affected,
+    )
+
+
+@router.post("/{document_id}/ocr", response_model=OcrResponse)
+async def ocr_document(document_id: str, request: OcrRequest) -> OcrResponse:
+    record = document_store.get(document_id)
+    if record is None:
+        raise _api_error(404, "DOCUMENT_NOT_FOUND", "No document was found with that ID.")
+
+    source_path = _current_source_path(record)
+
+    if request.pages:
+        target_pages = request.pages
+    else:
+        # "The system should determine whether OCR is required" — default
+        # to every page the analyzer flagged as scanned. Page *numbers*
+        # (unlike image xrefs) stay valid across a resave, so the cached
+        # analysis is fine to reuse here.
+        analysis = _get_or_run_analysis(document_id, record)
+        target_pages = [p.page_number for p in analysis.pages if p.is_scanned]
+
+    if not target_pages:
+        raise _api_error(400, "NO_SCANNED_PAGES", "No scanned pages were found that need OCR.")
+
+    try:
+        ocr_bytes, words_by_page = add_ocr_text_layer(source_path, target_pages)
+    except OcrError as exc:
+        raise _api_error(400, exc.code, exc.message) from exc
+
+    result_path = settings.result_path / f"{document_id}.pdf"
+    try:
+        result_path.write_bytes(ocr_bytes)
+    except OSError as exc:
+        logger.error("ocr_write_failed job_id=%s", document_id)
+        raise _api_error(500, "STORAGE_ERROR", "The OCR'd file could not be saved. Please try again.") from exc
+
+    document_store.set_result_path(document_id, str(result_path))
+    document_store.set_status(document_id, "processed")
+    analysis_store.delete(document_id)  # page text content changed; cached analysis is now stale
+
+    logger.info("ocr_success job_id=%s pages=%s", document_id, list(words_by_page.keys()))
+
+    return OcrResponse(
+        document_id=document_id,
+        pages_ocred=[OcrPageResult(page=page, words_added=count) for page, count in sorted(words_by_page.items())],
     )
