@@ -1,4 +1,4 @@
-import { ChevronLeft, ChevronRight, Eraser, Undo2, Wand2 } from "lucide-react";
+import { AlertTriangle, ChevronLeft, ChevronRight, Eraser, Undo2, Wand2 } from "lucide-react";
 import { useRef, useState } from "react";
 
 import { previewUrl } from "../services/api";
@@ -7,6 +7,7 @@ import type { ManualRegion } from "../types/document";
 interface ManualSelectionCanvasProps {
   documentId: string;
   pageCount: number;
+  scannedPages: Set<number>;
   onSubmit: (regions: ManualRegion[], applyToAllPages: boolean) => void;
   isSubmitting: boolean;
 }
@@ -16,7 +17,12 @@ interface PixelPoint {
   y: number;
 }
 
-export function ManualSelectionCanvas({ documentId, pageCount, onSubmit, isSubmitting }: ManualSelectionCanvasProps) {
+// Matches the backend's MAX_INPAINT_AREA_FRACTION safety cap in
+// manual_remover.py. Warning here first so the user finds out before
+// submitting, not just from the rejection after the fact.
+const LARGE_SELECTION_WARNING_THRESHOLD = 0.15;
+
+export function ManualSelectionCanvas({ documentId, pageCount, scannedPages, onSubmit, isSubmitting }: ManualSelectionCanvasProps) {
   const [currentPage, setCurrentPage] = useState(1);
   const [regions, setRegions] = useState<ManualRegion[]>([]);
   const [applyToAllPages, setApplyToAllPages] = useState(false);
@@ -67,6 +73,11 @@ export function ManualSelectionCanvas({ documentId, pageCount, onSubmit, isSubmi
   const clearAll = () => setRegions([]);
 
   const regionsOnCurrentPage = regions.filter((r) => r.page === currentPage);
+  const isCurrentPageScanned = scannedPages.has(currentPage);
+
+  const largeRegionOnScannedPage = isCurrentPageScanned
+    ? regionsOnCurrentPage.some((r) => (r.x1 - r.x0) * (r.y1 - r.y0) > LARGE_SELECTION_WARNING_THRESHOLD)
+    : false;
 
   const dragRect =
     dragStart && dragCurrent
@@ -179,6 +190,17 @@ export function ManualSelectionCanvas({ documentId, pageCount, onSubmit, isSubmi
           Apply this selection to all pages
         </label>
       </div>
+
+      {largeRegionOnScannedPage && (
+        <div className="mt-3 flex items-start gap-2 rounded-lg bg-warn/5 p-3 text-sm text-warn">
+          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+          <p>
+            This is a scanned page and your selection covers a large area. Removing it can't recover
+            what was underneath — it will leave a blurred/blank patch instead. Try a tighter box around
+            just the watermark for a cleaner result.
+          </p>
+        </div>
+      )}
 
       <div className="mt-3 flex flex-wrap items-center gap-2">
         <button

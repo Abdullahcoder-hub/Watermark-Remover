@@ -89,7 +89,10 @@ export function Home() {
     }
   };
 
-  const hasCleanedResult = processingStatus === "success" || manualStatus === "success" || ocrStatus === "success";
+  const hasCleanedResult =
+    processingStatus === "success" ||
+    manualStatus === "success" ||
+    (ocrStatus === "success" && (ocrResult?.pages_ocred.length ?? 0) > 0);
 
   return (
     <div className="mx-auto flex min-h-screen max-w-2xl flex-col px-6 py-16">
@@ -195,11 +198,17 @@ export function Home() {
 
             {ocrStatus === "success" && ocrResult && (
               <div className="mt-4 rounded-lg border border-accent/30 bg-white p-4">
-                <p className="text-sm font-medium text-ink">Document is now searchable</p>
-                <p className="mt-1 text-xs text-ink/50">
-                  {ocrResult.pages_ocred.reduce((sum, p) => sum + p.words_added, 0)} words recognized across{" "}
-                  {ocrResult.pages_ocred.length} page{ocrResult.pages_ocred.length === 1 ? "" : "s"}.
-                </p>
+                {ocrResult.pages_ocred.length > 0 ? (
+                  <>
+                    <p className="text-sm font-medium text-ink">Document is now searchable</p>
+                    <p className="mt-1 text-xs text-ink/50">
+                      {ocrResult.pages_ocred.reduce((sum, p) => sum + p.words_added, 0)} words recognized across{" "}
+                      {ocrResult.pages_ocred.length} page{ocrResult.pages_ocred.length === 1 ? "" : "s"}.
+                    </p>
+                  </>
+                ) : (
+                  <p className="text-sm text-ink/60">This document is already searchable — no OCR was needed.</p>
+                )}
               </div>
             )}
 
@@ -269,6 +278,9 @@ export function Home() {
                   <ManualSelectionCanvas
                     documentId={result.document_id}
                     pageCount={result.page_count}
+                    scannedPages={
+                      new Set((analysis?.pages ?? []).filter((p) => p.is_scanned).map((p) => p.page_number))
+                    }
                     onSubmit={handleManualSubmit}
                     isSubmitting={manualStatus === "removing"}
                   />

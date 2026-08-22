@@ -59,6 +59,31 @@ def test_analysis_flags_scanned_page() -> None:
     assert body["pages"][0]["is_scanned"] is True
 
 
+def test_manual_removal_on_scanned_page_rejects_oversized_selection() -> None:
+    """
+    Regression test for a real reported bug: a large selection box on a
+    scanned page doesn't just fail to remove the watermark cleanly — it
+    produces a washed-out, blank-looking page, because classical
+    inpainting has no surrounding pixel data to reconstruct a large
+    masked area from. Confirmed directly by reproducing it (a 65%-page
+    selection came back as a uniform foggy patch). Rather than silently
+    "succeed" into a ruined document, this must be rejected with an
+    explanation.
+    """
+    document_id = _upload(_build_scanned_pdf_with_stamp())
+
+    response = client.post(
+        f"/api/v1/documents/{document_id}/manual-remove",
+        json={"regions": [{"page": 1, "x0": 0.05, "y0": 0.1, "x1": 0.95, "y1": 0.9}]},
+    )
+    assert response.status_code == 400
+    assert response.json()["detail"]["error"]["code"] == "SELECTION_TOO_LARGE"
+
+    # And the document must be left untouched — no partial/corrupted result written.
+    status_response = client.get(f"/api/v1/documents/{document_id}/status")
+    assert status_response.json()["status"] != "processed"
+
+
 def test_manual_removal_on_scanned_page_does_not_delete_entire_scan() -> None:
     """
     The core regression test: before this phase, a small selection box
@@ -195,7 +220,8 @@ def test_ocr_does_not_visually_alter_the_page() -> None:
     assert abs(len(before_bytes) - len(after_bytes)) < len(before_bytes) * 0.05
 
 
-def test_ocr_on_document_with_no_scanned_pages_returns_error() -> None:
+def test_ocr_on_document_with_no_scanned_pages_is_a_graceful_no_op() -> None:
+    """Not an error: nothing needed OCR, so nothing changed — a valid, successful outcome."""
     doc = fitz.open()
     page = doc.new_page(width=300, height=300)
     page.insert_text((20, 30), "Perfectly normal text document.", fontsize=12)
@@ -204,8 +230,26 @@ def test_ocr_on_document_with_no_scanned_pages_returns_error() -> None:
 
     document_id = _upload(pdf_bytes, filename="normal.pdf")
     response = client.post(f"/api/v1/documents/{document_id}/ocr", json={})
-    assert response.status_code == 400
-    assert response.json()["detail"]["error"]["code"] == "NO_SCANNED_PAGES"
+    assert response.status_code == 200
+    body = response.json()
+    assert body["pages_ocred"] == []
+
+
+def test_ocr_called_twice_is_graceful_second_time() -> None:
+    """
+    OCR itself adds a text layer, so a page that was scanned no longer
+    looks scanned afterward. Calling OCR again must not error — it
+    should recognize there's nothing left to do.
+    """
+    document_id = _upload(_build_scanned_pdf_with_stamp())
+
+    first = client.post(f"/api/v1/documents/{document_id}/ocr", json={})
+    assert first.status_code == 200
+    assert len(first.json()["pages_ocred"]) == 1
+
+    second = client.post(f"/api/v1/documents/{document_id}/ocr", json={})
+    assert second.status_code == 200
+    assert second.json()["pages_ocred"] == []
 
 
 def test_ocr_unknown_document_returns_404() -> None:

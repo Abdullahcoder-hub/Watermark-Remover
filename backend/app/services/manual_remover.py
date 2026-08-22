@@ -38,6 +38,18 @@ _IMAGES_REMOVE = fitz.PDF_REDACT_IMAGE_REMOVE
 # should go, not only ones fully enclosed by it.
 _GRAPHICS_REMOVE = fitz.PDF_REDACT_LINE_ART_REMOVE_IF_TOUCHED
 
+# Classical inpainting (Telea) reconstructs a masked area from its
+# surrounding pixels. It has no source data to work with once the
+# masked area gets large relative to the image, and produces a
+# washed-out/blank-looking result instead -- confirmed directly: a
+# selection covering ~65% of a scanned page came back as a uniform
+# foggy patch, indistinguishable from data loss even though nothing
+# was silently destroyed by the removal logic itself. Rather than
+# let that happen quietly, a selection this large on a scanned page
+# is rejected with an explanation instead of "succeeding" into a
+# ruined page.
+MAX_INPAINT_AREA_FRACTION = 0.20
+
 
 class ManualRemovalError(Exception):
     def __init__(self, code: str, message: str):
@@ -77,6 +89,16 @@ def _inpaint_page(pdf: "fitz.Document", page: "fitz.Page", xref: int, regions: l
     height, width = image.shape[:2]
 
     mask = build_mask((height, width), [(r.x0, r.y0, r.x1, r.y1) for r in regions])
+
+    masked_fraction = float((mask > 0).sum()) / float(height * width)
+    if masked_fraction > MAX_INPAINT_AREA_FRACTION:
+        raise ManualRemovalError(
+            "SELECTION_TOO_LARGE",
+            f"This selection covers {masked_fraction:.0%} of the page. On a scanned page, restoring "
+            f"an area this large isn't possible — there's no real content to reconstruct it from, and "
+            f"the result would just be a blank patch. Try a tighter box around just the watermark.",
+        )
+
     restored = inpaint(image, mask)
     restored_bytes = encode_png(restored)
     page.replace_image(xref, stream=restored_bytes)

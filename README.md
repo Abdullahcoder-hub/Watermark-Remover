@@ -207,11 +207,31 @@ pytest tests/ -v
   out to `ocrmypdf`/Ghostscript/qpdf — same OCR engine, lighter toolchain. Verified the invisible layer
   doesn't create a visible duplicate by rendering before/after and confirming pixel output is
   unchanged.
+- **OCR is idempotent, not an error on re-run:** since OCR itself adds a text layer, a page that was
+  scanned no longer looks scanned right after — calling `/ocr` again (or on a document that never
+  needed it) returns `200 OK` with an empty `pages_ocred` list rather than a `400` error. This was a
+  real bug caught from user-reported behavior: calling `/ocr` twice on the same document originally
+  raised `NO_SCANNED_PAGES` as a hard error, which is the wrong signal for "there's nothing left to
+  do" — that's a successful end-state, not a failure. Fixed, tested (`test_ocr_called_twice_is_graceful_second_time`),
+  and mirrored in the frontend, which shows "This document is already searchable — no OCR was needed"
+  instead of a misleading "0 words across 0 pages" success card.
 - **A second xref-staleness bug, caught before shipping:** cached analysis (with its embedded image
   xrefs) goes stale after *any* prior save, since PyMuPDF's garbage-collecting save renumbers PDF
   objects document-wide — even for pages that save didn't touch. Manual removal's scanned-page lookup
   now always re-analyzes the exact bytes it's about to inpaint, rather than trusting a cached value
   that might refer to a different object than intended.
+- **A third bug, reported by a real user and reproduced directly:** removing a watermark from a
+  scanned page (e.g. a CamScanner export) left the *entire page blank* instead of just clearing the
+  watermark. Reproducing it confirmed the cause: classical inpainting reconstructs a masked region from
+  its surrounding pixels, and once the selected area covers a large fraction of the page, there's
+  nothing left to reconstruct from — the result comes back as a uniform washed-out patch that looks
+  exactly like data loss, even though nothing was corrupted. This is an inherent limit of
+  `cv2.inpaint`, not a bug in the removal logic itself. Fixed with a safety cap
+  (`MAX_INPAINT_AREA_FRACTION = 0.20` in `manual_remover.py`): a selection covering more than 20% of a
+  scanned page's area is rejected up front with a `SELECTION_TOO_LARGE` error explaining why, instead
+  of silently producing a ruined page. The frontend also warns proactively above 15% coverage on a
+  scanned page, before the user even submits. Regression test:
+  `test_manual_removal_on_scanned_page_rejects_oversized_selection`.
 
 ## What Phase 6 does NOT do yet
 
