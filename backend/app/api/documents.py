@@ -424,7 +424,13 @@ async def ocr_document(document_id: str, request: OcrRequest) -> OcrResponse:
         target_pages = [p.page_number for p in analysis.pages if p.is_scanned]
 
     if not target_pages:
-        raise _api_error(400, "NO_SCANNED_PAGES", "No scanned pages were found that need OCR.")
+        # Not an error: the document either never needed OCR, or
+        # already has a text layer (e.g. OCR ran once already, which
+        # itself makes a page no longer look "scanned"). Per the spec,
+        # OCR must not unnecessarily modify a document that already
+        # has usable text — the correct response is "nothing to do",
+        # not a failure. Leave the document and caches untouched.
+        return OcrResponse(document_id=document_id, pages_ocred=[])
 
     try:
         ocr_bytes, words_by_page = add_ocr_text_layer(source_path, target_pages)
