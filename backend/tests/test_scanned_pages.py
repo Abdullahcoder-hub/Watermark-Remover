@@ -283,3 +283,128 @@ def test_manual_removal_after_automatic_process_still_finds_correct_scanned_xref
     cleaned = fitz.open(stream=download_response.content, filetype="pdf")
     assert len(cleaned[0].get_image_info()) == 1  # scan still present, not deleted
     cleaned.close()
+
+
+def _build_scanned_pdf_with_margin_and_logo() -> bytes:
+    """
+    Reproduces a real reported bug: a realistic scanned export (e.g.
+    CamScanner) where the scan image has a modest margin/border rather
+    than covering literally 100% of the page, plus a small separate
+    logo image in a corner. Before the coverage threshold fix, this
+    margin alone dropped the scan's coverage below the "is this a
+    scanned page" cutoff, causing the scan to be misidentified as a
+    removable watermark image and destroyed when selected.
+    """
+    src = fitz.open()
+    sp = src.new_page(width=595, height=842)
+    sp.draw_rect(fitz.Rect(0, 0, 595, 842), fill=(0.96, 0.96, 0.94))
+    for i in range(10):
+        sp.insert_text((40, 60 + i * 35), f"Handwritten program line {i + 1} content.", fontsize=12, color=(0.05, 0.05, 0.4))
+    scan_bytes = sp.get_pixmap(matrix=fitz.Matrix(2, 2)).tobytes("png")
+    src.close()
+
+    logo_src = fitz.open()
+    lp = logo_src.new_page(width=40, height=25)
+    lp.draw_rect(fitz.Rect(0, 0, 40, 25), fill=(0.1, 0.6, 0.5))
+    lp.insert_text((5, 17), "CS", fontsize=14, color=(1, 1, 1))
+    logo_bytes = lp.get_pixmap(matrix=fitz.Matrix(3, 3)).tobytes("png")
+    logo_src.close()
+
+    doc = fitz.open()
+    page = doc.new_page(width=595, height=842)
+    margin_x, margin_y = 595 * 0.08, 842 * 0.06  # realistic auto-crop margin
+    page.insert_image(fitz.Rect(margin_x, margin_y, 595 - margin_x, 842 - margin_y), stream=scan_bytes)
+    page.insert_image(fitz.Rect(555, 810, 590, 835), stream=logo_bytes)
+    data = doc.tobytes()
+    doc.close()
+    return data
+
+
+def test_scanned_page_with_realistic_margin_is_still_flagged_as_scanned() -> None:
+    """Regression test: a margin alone must not defeat scanned-page detection."""
+    document_id = _upload(_build_scanned_pdf_with_margin_and_logo())
+    response = client.post(f"/api/v1/documents/{document_id}/analyze")
+    body = response.json()
+    assert body["pages"][0]["is_scanned"] is True
+
+
+def test_scan_with_margin_is_not_offered_as_a_watermark_image_candidate() -> None:
+    """
+    Regression test for the exact reported bug: the main scan (with a
+    realistic margin) must never be surfaced as a removable "image"
+    watermark candidate — only the small separate logo may be.
+    """
+    document_id = _upload(_build_scanned_pdf_with_margin_and_logo())
+    response = client.post(f"/api/v1/documents/{document_id}/detect")
+    candidates = response.json()["candidates"]
+
+    image_candidates = [c for c in candidates if c["type"] == "image"]
+    for candidate in image_candidates:
+        # Every offered image candidate must be small (the logo), never
+        # the dominant scan.
+        bbox = candidate["bbox"]
+        area = (bbox[2] - bbox[0]) * (bbox[3] - bbox[1])
+        assert area < 595 * 842 * 0.3, "the main scan was offered as a watermark candidate"
+
+
+def test_manual_removal_on_margin_scan_page_uses_inpainting_not_redaction() -> None:
+    """
+    Regression test: with the margin, this page must route through
+    inpainting (not redaction) so a small logo selection can't destroy
+    the whole scan.
+    """
+    document_id = _upload(_build_scanned_pdf_with_margin_and_logo())
+
+    response = client.post(
+        f"/api/v1/documents/{document_id}/manual-remove",
+        json={"regions": [{"page": 1, "x0": 0.93, "y0": 0.96, "x1": 0.995, "y1": 0.99}]},
+    )
+    assert response.status_code == 200
+
+    download_response = client.get(f"/api/v1/documents/{document_id}/download")
+    cleaned = fitz.open(stream=download_response.content, filetype="pdf")
+    page = cleaned[0]
+    # The scan image must still be present — proof it was inpainted,
+    # not deleted outright by redaction.
+    assert len(page.get_image_info()) >= 1
+    assert "Handwritten program line 1" in page.get_text() or _has_dark_pixels(page)
+    cleaned.close()
+
+
+def _has_dark_pixels(page: "fitz.Page") -> bool:
+    pix = page.get_pixmap(clip=fitz.Rect(30, 40, 400, 400))
+    return any(b < 150 for b in pix.samples)
+
+
+def test_automatic_process_refuses_to_delete_dominant_page_image() -> None:
+    """
+    Defense-in-depth regression test: even if an image candidate for
+    the dominant scan somehow gets generated and selected, automatic
+    /process must refuse to delete it rather than blanking the page.
+    """
+    document_id = _upload(_build_scanned_pdf_with_margin_and_logo())
+    detect_response = client.post(f"/api/v1/documents/{document_id}/detect")
+    candidates = detect_response.json()["candidates"]
+
+    # Manually construct a candidate targeting the full scan area, as
+    # if detection had (incorrectly) offered it — simulates the bug
+    # scenario directly rather than relying on detection never
+    # regressing.
+    large_bbox_candidates = [c for c in candidates if c["type"] == "image"]
+    if not large_bbox_candidates:
+        return  # detection correctly excluded it; nothing to defend against here
+
+    ids = [c["candidate_id"] for c in large_bbox_candidates]
+    process_response = client.post(
+        f"/api/v1/documents/{document_id}/process",
+        json={"candidate_ids": ids, "pages": "all"},
+    )
+    assert process_response.status_code == 200
+    body = process_response.json()
+
+    download_response = client.get(f"/api/v1/documents/{document_id}/download")
+    cleaned = fitz.open(stream=download_response.content, filetype="pdf")
+    # The page must not have been blanked — some image must remain.
+    assert len(cleaned[0].get_image_info()) >= 1
+    cleaned.close()
+

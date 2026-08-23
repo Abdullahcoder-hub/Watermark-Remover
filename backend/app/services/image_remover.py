@@ -28,6 +28,17 @@ _IMAGES_REMOVE = fitz.PDF_REDACT_IMAGE_REMOVE
 
 _MATCH_TOLERANCE_POINTS = 3.0
 
+# Defense-in-depth: even if detection or a coverage threshold upstream
+# misclassifies something, never let automatic removal fully delete an
+# image that dominates most of the page — that's Case C content (a
+# scan), not a watermark object, and deleting it destroys the page.
+# Confirmed directly: a scan with a realistic margin scored below the
+# old scanned-page threshold, got offered as a removable "watermark
+# image candidate", and deleting it blanked the whole page. This check
+# means that failure mode is caught here too, not just by tuning one
+# threshold in pdf_analyzer.py.
+MAX_AUTO_REMOVAL_COVERAGE = 0.5
+
 
 class ImageRemovalError(Exception):
     def __init__(self, code: str, message: str):
@@ -114,6 +125,16 @@ def remove_image_candidates(
                     if rect is None:
                         skipped_candidate_ids.append(candidate.candidate_id)
                         continue
+
+                    page_area = page.rect.width * page.rect.height
+                    coverage = (rect.width * rect.height) / page_area if page_area > 0 else 0.0
+                    if coverage > MAX_AUTO_REMOVAL_COVERAGE:
+                        # Looks like page content, not a watermark — refuse
+                        # rather than delete it outright. Manual selection's
+                        # inpainting path is the safe way to handle this.
+                        skipped_candidate_ids.append(candidate.candidate_id)
+                        continue
+
                     page.add_redact_annot(rect, fill=None)
                     redacted_any = True
 

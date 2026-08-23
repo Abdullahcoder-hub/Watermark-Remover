@@ -232,6 +232,29 @@ pytest tests/ -v
   of silently producing a ruined page. The frontend also warns proactively above 15% coverage on a
   scanned page, before the user even submits. Regression test:
   `test_manual_removal_on_scanned_page_rejects_oversized_selection`.
+- **A fourth bug, also reported by a real user and reproduced directly:** a genuine scanned document
+  (10-page CamScanner export) had its automatic "image watermark" removal blank the entire page, and
+  separately, manual removal of the small CamScanner logo also failed to work correctly. Reproducing it
+  with a realistic scan margin (CamScanner-style auto-crop, ~8%/6% border rather than covering literally
+  100% of the page) pinned the cause: that margin alone dropped the scan's coverage to ~0.71, under the
+  old `SCANNED_IMAGE_COVERAGE_THRESHOLD` of 0.85. The page was then never classified as "scanned" at
+  all, which broke *two* things at once: (1) the automatic image detector offered the entire scan as a
+  removable watermark candidate (since it fell inside the detector's "moderate size" range instead of
+  being excluded as full-page content), and (2) manual selection routed the page through redaction
+  instead of inpainting, so any small box overlapping the scan deleted it outright. Fixed two ways:
+  - Lowered `SCANNED_IMAGE_COVERAGE_THRESHOLD` to 0.55 (`pdf_analyzer.py`) — a real scanned page still
+    dominates the page even with a generous margin, while a legitimate watermark logo never comes close
+    to that share.
+  - Added defense-in-depth so a single mistuned threshold can't cause this again: automatic removal
+    (`watermark_remover.py`) now refuses to delete any image covering more than 50% of the page
+    (`MAX_AUTO_REMOVAL_COVERAGE`), and manual removal's redaction path (`manual_remover.py`) refuses to
+    proceed if the selected box overlaps any image that large (`MAX_REDACTABLE_IMAGE_COVERAGE`), on
+    *any* page — not just ones already classified as scanned. Both return a clear error instead of
+    silently deleting page content. Regression tests:
+    `test_scanned_page_with_realistic_margin_is_still_flagged_as_scanned`,
+    `test_scan_with_margin_is_not_offered_as_a_watermark_image_candidate`,
+    `test_manual_removal_on_margin_scan_page_uses_inpainting_not_redaction`,
+    `test_automatic_process_refuses_to_delete_dominant_page_image`.
 
 ## What Phase 6 does NOT do yet
 

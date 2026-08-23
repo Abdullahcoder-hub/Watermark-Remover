@@ -26,6 +26,17 @@ from app.services.text_remover import RemovalError, _closest_quad
 
 _GRAPHICS_UNTOUCHED = fitz.PDF_REDACT_LINE_ART_NONE
 
+# Defense-in-depth: even if detection or a coverage threshold upstream
+# misclassifies something, never let automatic removal fully delete an
+# image that dominates most of the page — that's Case C content (a
+# scan), not a watermark object, and deleting it destroys the page.
+# Confirmed directly: a scan with a realistic margin scored below the
+# scanned-page coverage threshold, got offered as a removable
+# "watermark image candidate", and deleting it blanked the whole page.
+# This check catches that failure mode here too, not just by tuning
+# one threshold in pdf_analyzer.py.
+MAX_AUTO_REMOVAL_COVERAGE = 0.5
+
 
 def remove_candidates(
     source: Path | bytes,
@@ -79,6 +90,15 @@ def remove_candidates(
                         if rect is None:
                             skipped_candidate_ids.append(candidate.candidate_id)
                             continue
+
+                        page_area = page.rect.width * page.rect.height
+                        coverage = (rect.width * rect.height) / page_area if page_area > 0 else 0.0
+                        if coverage > MAX_AUTO_REMOVAL_COVERAGE:
+                            # Looks like page content, not a watermark —
+                            # refuse rather than delete it outright.
+                            skipped_candidate_ids.append(candidate.candidate_id)
+                            continue
+
                         page.add_redact_annot(rect, fill=None)
                         has_image = True
 

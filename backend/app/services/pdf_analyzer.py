@@ -20,8 +20,20 @@ from app.schemas.analysis import DocumentAnalysisResponse, ImageObject, PageAnal
 
 # A page is treated as "scanned" when it has almost no extractable text
 # and at least one image that covers most of the page area.
+#
+# Threshold history: originally 0.85, but real-world scans (e.g.
+# CamScanner exports) commonly have a margin/border around the
+# auto-cropped content — even a modest 8%/6% margin drops coverage to
+# ~0.71, well under 0.85. That caused a real bug: such a page was
+# never flagged as scanned, so its dominant image was (a) incorrectly
+# offered as a removable "watermark image candidate" by the automatic
+# detector, and (b) routed to destructive redaction instead of
+# inpainting during manual removal — either path deletes the entire
+# scan. Lowered to 0.55, since a legitimate small watermark logo is
+# essentially never anywhere near that share of the page, while a
+# genuine scanned page dominates it even with generous margins.
 SCANNED_TEXT_LENGTH_THRESHOLD = 20
-SCANNED_IMAGE_COVERAGE_THRESHOLD = 0.85
+SCANNED_IMAGE_COVERAGE_THRESHOLD = 0.55
 
 
 class AnalysisError(Exception):

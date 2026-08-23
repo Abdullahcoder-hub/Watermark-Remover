@@ -69,17 +69,46 @@ def _regions_for_document(regions: list[ManualRegion], page_count: int, apply_to
     return expanded
 
 
+# Same defense-in-depth as the automatic removal path
+# (watermark_remover.py / image_remover.py): never let a redaction box
+# delete an image that dominates the page, even on a page that wasn't
+# classified as "scanned" — since that classification can be wrong
+# (see SCANNED_IMAGE_COVERAGE_THRESHOLD's history in pdf_analyzer.py).
+MAX_REDACTABLE_IMAGE_COVERAGE = 0.5
+
+
+def _rects_overlap(a: "fitz.Rect", b: "fitz.Rect") -> bool:
+    return a.intersects(b)
+
+
 def _redact_page(page: "fitz.Page", regions: list[ManualRegion], page_width: float, page_height: float) -> None:
-    for region in regions:
-        rect = fitz.Rect(
-            region.x0 * page_width,
-            region.y0 * page_height,
-            region.x1 * page_width,
-            region.y1 * page_height,
-        )
-        if rect.is_empty:
+    page_area = page_width * page_height
+    region_rects = [
+        fitz.Rect(r.x0 * page_width, r.y0 * page_height, r.x1 * page_width, r.y1 * page_height) for r in regions
+    ]
+
+    if page_area > 0:
+        for image_info in page.get_image_info(xrefs=True):
+            bbox = image_info.get("bbox")
+            if not bbox:
+                continue
+            image_rect = fitz.Rect(bbox)
+            coverage = (image_rect.width * image_rect.height) / page_area
+            if coverage <= MAX_REDACTABLE_IMAGE_COVERAGE:
+                continue
+            if any(_rects_overlap(image_rect, region_rect) for region_rect in region_rects):
+                raise ManualRemovalError(
+                    "SELECTION_OVERLAPS_PAGE_CONTENT",
+                    "This selection overlaps an image that covers most of the page, which looks like "
+                    "the page's actual content rather than a watermark. Deleting it would destroy the "
+                    "page. If this is a scanned document, try re-uploading it, or choose a smaller box "
+                    "that avoids the main content area.",
+                )
+
+    for region_rect in region_rects:
+        if region_rect.is_empty:
             continue
-        page.add_redact_annot(rect, fill=None)
+        page.add_redact_annot(region_rect, fill=None)
     page.apply_redactions(images=_IMAGES_REMOVE, graphics=_GRAPHICS_REMOVE, text=_TEXT_REMOVE)
 
 
