@@ -119,3 +119,36 @@ class DetectionStore:
 
 
 detection_store = DetectionStore()
+
+
+class PreviewCache:
+    """
+    Caches rendered page-preview PNGs. Keyed by (document_id, page,
+    file mtime) so a cache entry automatically becomes unreachable
+    the moment the underlying file changes (any removal step
+    rewrites result_path with a new mtime) — no manual invalidation
+    needed. Capped to avoid unbounded growth across many documents.
+    """
+
+    _MAX_ENTRIES = 200
+
+    def __init__(self) -> None:
+        self._cache: dict[tuple[str, int, float], bytes] = {}
+        self._order: list[tuple[str, int, float]] = []
+        self._lock = threading.Lock()
+
+    def get(self, document_id: str, page: int, mtime: float) -> bytes | None:
+        with self._lock:
+            return self._cache.get((document_id, page, mtime))
+
+    def set(self, document_id: str, page: int, mtime: float, png_bytes: bytes) -> None:
+        with self._lock:
+            key = (document_id, page, mtime)
+            if key not in self._cache and len(self._order) >= self._MAX_ENTRIES:
+                oldest = self._order.pop(0)
+                self._cache.pop(oldest, None)
+            self._cache[key] = png_bytes
+            self._order.append(key)
+
+
+preview_cache = PreviewCache()

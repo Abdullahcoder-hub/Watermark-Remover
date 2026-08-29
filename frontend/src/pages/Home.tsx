@@ -118,13 +118,13 @@ export function Home() {
         ) : null}
 
         {status === "error" && (
-          <div className="mt-6 rounded-xl border border-warn/30 bg-warn/5 p-6">
+          <div className="mt-6 rounded-2xl border border-warn/20 bg-warn/5 p-6 shadow-sm">
             <p className="font-medium text-warn">We couldn't upload this document.</p>
             <p className="mt-1 text-sm text-ink/70">{errorMessage}</p>
             <button
               type="button"
               onClick={reset}
-              className="mt-4 inline-flex items-center gap-2 rounded-lg border border-ink/15 px-4 py-2 text-sm font-medium text-ink hover:bg-ink/5 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+              className="mt-4 inline-flex items-center gap-2 rounded-xl border border-ink/15 px-4 py-2 text-sm font-medium text-ink hover:bg-ink/5 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
             >
               <RotateCcw className="h-4 w-4" aria-hidden="true" />
               Try another file
@@ -133,7 +133,7 @@ export function Home() {
         )}
 
         {status === "success" && result && (
-          <div className="mt-6 rounded-xl border border-accent/30 bg-accent/5 p-6">
+          <div className="mt-6 rounded-2xl border border-accent/20 bg-accent/[0.04] p-6 shadow-sm">
             <div className="flex items-start gap-3">
               <CheckCircle2 className="mt-0.5 h-5 w-5 shrink-0 text-accent" aria-hidden="true" />
               <div>
@@ -167,13 +167,13 @@ export function Home() {
             )}
 
             {analysisStatus === "error" && (
-              <div className="mt-4 rounded-lg bg-warn/5 p-3 text-sm text-warn">Analysis failed: {analysisError}</div>
+              <div className="mt-4 rounded-xl bg-warn/5 p-3 text-sm text-warn">Analysis failed: {analysisError}</div>
             )}
 
             {analysisStatus === "success" && analysis && <AnalysisSummary analysis={analysis} />}
 
             {analysisStatus === "success" && analysis?.appears_scanned && ocrStatus !== "success" && (
-              <div className="mt-4 rounded-lg border border-ink/10 bg-white p-4">
+              <div className="mt-4 rounded-xl border border-ink/10 bg-white p-4">
                 <p className="text-sm font-medium text-ink">This document looks scanned</p>
                 <p className="mt-1 text-xs text-ink/50">
                   Its text isn't selectable or searchable yet. Run OCR to add a searchable text layer —
@@ -183,7 +183,7 @@ export function Home() {
                   type="button"
                   onClick={handleRunOcr}
                   disabled={ocrStatus === "running"}
-                  className="mt-3 inline-flex items-center gap-2 rounded-lg border border-ink/15 px-4 py-2 text-sm font-medium text-ink hover:bg-ink/5 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:cursor-not-allowed disabled:opacity-50"
+                  className="mt-3 inline-flex items-center gap-2 rounded-xl border border-ink/15 px-4 py-2 text-sm font-medium text-ink hover:bg-ink/5 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   {ocrStatus === "running" ? (
                     <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
@@ -197,7 +197,7 @@ export function Home() {
             )}
 
             {ocrStatus === "success" && ocrResult && (
-              <div className="mt-4 rounded-lg border border-accent/30 bg-white p-4">
+              <div className="mt-4 rounded-xl border border-accent/20 bg-white p-4">
                 {ocrResult.pages_ocred.length > 0 ? (
                   <>
                     <p className="text-sm font-medium text-ink">Document is now searchable</p>
@@ -220,7 +220,7 @@ export function Home() {
             )}
 
             {detectionStatus === "error" && (
-              <div className="mt-4 rounded-lg bg-warn/5 p-3 text-sm text-warn">Detection failed: {detectionError}</div>
+              <div className="mt-4 rounded-xl bg-warn/5 p-3 text-sm text-warn">Detection failed: {detectionError}</div>
             )}
 
             {detectionStatus === "success" && detection && processingStatus !== "success" && (
@@ -232,7 +232,7 @@ export function Home() {
                     type="button"
                     onClick={handleRemoveWatermarks}
                     disabled={selectedIds.size === 0 || processingStatus === "processing"}
-                    className="mt-4 inline-flex items-center gap-2 rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent/90 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:cursor-not-allowed disabled:opacity-50"
+                    className="mt-4 inline-flex items-center gap-2 rounded-xl bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent/90 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     {processingStatus === "processing" ? (
                       <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
@@ -246,11 +246,11 @@ export function Home() {
             )}
 
             {processingStatus === "error" && (
-              <div className="mt-4 rounded-lg bg-warn/5 p-3 text-sm text-warn">Removal failed: {processingError}</div>
+              <div className="mt-4 rounded-xl bg-warn/5 p-3 text-sm text-warn">Removal failed: {processingError}</div>
             )}
 
             {processingStatus === "success" && processing && (
-              <div className="mt-4 rounded-lg border border-accent/30 bg-white p-4">
+              <div className="mt-4 rounded-xl border border-accent/20 bg-white p-4">
                 <p className="text-sm font-medium text-ink">
                   Removed {processing.removed_count} of {processing.requested_count} selected watermark
                   {processing.requested_count === 1 ? "" : "s"}
@@ -269,7 +269,7 @@ export function Home() {
                   <button
                     type="button"
                     onClick={() => setShowManualSelection(true)}
-                    className="inline-flex items-center gap-2 rounded-lg border border-ink/15 px-4 py-2 text-sm font-medium text-ink hover:bg-ink/5 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+                    className="inline-flex items-center gap-2 rounded-xl border border-ink/15 px-4 py-2 text-sm font-medium text-ink hover:bg-ink/5 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
                   >
                     <MousePointerSquareDashed className="h-4 w-4" aria-hidden="true" />
                     Still see a watermark? Select it manually
@@ -287,11 +287,11 @@ export function Home() {
                 )}
 
                 {manualStatus === "error" && (
-                  <div className="mt-3 rounded-lg bg-warn/5 p-3 text-sm text-warn">Removal failed: {manualError}</div>
+                  <div className="mt-3 rounded-xl bg-warn/5 p-3 text-sm text-warn">Removal failed: {manualError}</div>
                 )}
 
                 {manualStatus === "success" && manualResult && (
-                  <div className="mt-3 rounded-lg border border-accent/30 bg-white p-4">
+                  <div className="mt-3 rounded-xl border border-accent/20 bg-white p-4">
                     <p className="text-sm font-medium text-ink">
                       Removed {manualResult.regions_applied} manually selected area{manualResult.regions_applied === 1 ? "" : "s"}
                     </p>
@@ -304,7 +304,7 @@ export function Home() {
             {hasCleanedResult && (
               <a
                 href={downloadUrl(result.document_id)}
-                className="mt-4 inline-flex items-center gap-2 rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent/90 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+                className="mt-4 inline-flex items-center gap-2 rounded-xl bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent/90 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
               >
                 <Download className="h-4 w-4" aria-hidden="true" />
                 Download cleaned PDF
@@ -315,7 +315,7 @@ export function Home() {
               <button
                 type="button"
                 onClick={reset}
-                className="mt-4 inline-flex items-center gap-2 rounded-lg border border-ink/15 px-4 py-2 text-sm font-medium text-ink hover:bg-ink/5 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+                className="mt-4 inline-flex items-center gap-2 rounded-xl border border-ink/15 px-4 py-2 text-sm font-medium text-ink hover:bg-ink/5 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
               >
                 <RotateCcw className="h-4 w-4" aria-hidden="true" />
                 Upload another document

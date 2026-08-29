@@ -12,17 +12,17 @@ export function AnalysisSummary({ analysis }: AnalysisSummaryProps) {
       <p className="mb-3 text-sm font-medium text-ink">Document analysis</p>
 
       <div className="grid grid-cols-3 gap-3 text-center">
-        <div className="rounded-lg bg-ink/[0.03] p-3">
+        <div className="rounded-xl bg-ink/[0.03] p-3">
           <Type className="mx-auto h-4 w-4 text-ink/40" aria-hidden="true" />
           <p className="mt-1 text-lg font-semibold text-ink">{analysis.total_text_objects}</p>
           <p className="text-xs text-ink/50">text objects</p>
         </div>
-        <div className="rounded-lg bg-ink/[0.03] p-3">
+        <div className="rounded-xl bg-ink/[0.03] p-3">
           <ImageIcon className="mx-auto h-4 w-4 text-ink/40" aria-hidden="true" />
           <p className="mt-1 text-lg font-semibold text-ink">{analysis.total_images}</p>
           <p className="text-xs text-ink/50">images</p>
         </div>
-        <div className="rounded-lg bg-ink/[0.03] p-3">
+        <div className="rounded-xl bg-ink/[0.03] p-3">
           <ScanLine className="mx-auto h-4 w-4 text-ink/40" aria-hidden="true" />
           <p className="mt-1 text-lg font-semibold text-ink">{analysis.appears_scanned ? "Yes" : "No"}</p>
           <p className="text-xs text-ink/50">appears scanned</p>
@@ -30,7 +30,7 @@ export function AnalysisSummary({ analysis }: AnalysisSummaryProps) {
       </div>
 
       {analysis.appears_scanned && (
-        <div className="mt-3 flex items-start gap-2 rounded-lg bg-ink/[0.03] p-3 text-sm text-ink/60">
+        <div className="mt-3 flex items-start gap-2 rounded-xl bg-ink/[0.03] p-3 text-sm text-ink/60">
           <FileWarning className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
           <p>
             This document looks like a scanned image rather than searchable text. Manual selection on

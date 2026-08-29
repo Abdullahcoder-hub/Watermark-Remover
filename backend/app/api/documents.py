@@ -38,7 +38,7 @@ from app.services.scanned_detector import scanned_page_xrefs
 from app.services.text_remover import RemovalError
 from app.services.watermark_detector import generate_candidates
 from app.services.watermark_remover import remove_candidates
-from app.utils.document_store import DocumentRecord, analysis_store, detection_store, document_store, utcnow
+from app.utils.document_store import DocumentRecord, analysis_store, detection_store, document_store, preview_cache, utcnow
 from app.utils.file_validation import FileValidationError, generate_document_id, safe_pdf_path, validate_upload
 
 logger = logging.getLogger("document_cleaner")
@@ -316,7 +316,11 @@ async def download_document(document_id: str) -> FileResponse:
 
 # 150 DPI keeps preview images legible for manual selection without
 # being large enough to slow down the page-image round trip.
-PREVIEW_DPI = 150
+# 120 DPI keeps preview images legible for manual selection while
+# rendering and transferring noticeably faster than the previous 150 —
+# page navigation was reported as slow, and render + PNG-encode time
+# scales with the square of the DPI.
+PREVIEW_DPI = 120
 
 
 @router.get("/{document_id}/preview/{page_number}")
@@ -328,20 +332,36 @@ async def preview_page(document_id: str, page_number: int) -> Response:
     source_path = _current_source_path(record)
 
     try:
+        mtime = source_path.stat().st_mtime
+    except OSError:
+        mtime = 0.0
+
+    cached = preview_cache.get(document_id, page_number, mtime)
+    if cached is not None:
+        return Response(content=cached, media_type="image/jpeg")
+
+    try:
         with fitz.open(source_path) as pdf:
             if page_number < 1 or page_number > pdf.page_count:
                 raise _api_error(400, "INVALID_PAGE", f"This document has {pdf.page_count} pages.")
             page = pdf[page_number - 1]
             zoom = PREVIEW_DPI / 72
             pixmap = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom))
-            png_bytes = pixmap.tobytes("png")
+            # JPEG rather than PNG: this is a UI preview for manual
+            # selection, not the downloaded document (which stays
+            # lossless), and photographic scanned content compresses
+            # ~80% smaller as JPEG — a real fix for page-navigation
+            # feeling slow, since transfer size dominates render time
+            # on anything but localhost.
+            image_bytes = pixmap.tobytes("jpg", jpg_quality=85)
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001 - any PyMuPDF failure means the file couldn't be rendered
         logger.error("preview_failed job_id=%s page=%s", document_id, page_number)
         raise _api_error(500, "PREVIEW_FAILED", "This page could not be rendered.") from exc
 
-    return Response(content=png_bytes, media_type="image/png")
+    preview_cache.set(document_id, page_number, mtime, image_bytes)
+    return Response(content=image_bytes, media_type="image/jpeg")
 
 
 @router.post("/{document_id}/manual-remove", response_model=ManualRemovalResponse)

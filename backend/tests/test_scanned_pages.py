@@ -408,3 +408,75 @@ def test_automatic_process_refuses_to_delete_dominant_page_image() -> None:
     assert len(cleaned[0].get_image_info()) >= 1
     cleaned.close()
 
+
+def _build_scanned_pdf_with_separate_overlay_logo() -> bytes:
+    """
+    Reproduces the exact structure found in a real CamScanner export:
+    the visible logo is its own small separate image object, layered
+    on top of (not baked into) the main scan image — confirmed by
+    directly inspecting the real file's xrefs (dominant scan ~78%
+    coverage, logo ~0.1% coverage, both present via get_image_info).
+    """
+    src = fitz.open()
+    sp = src.new_page(width=595, height=842)
+    sp.draw_rect(fitz.Rect(0, 0, 595, 842), fill=(0.96, 0.96, 0.94))
+    for i in range(8):
+        sp.insert_text((40, 60 + i * 35), f"Handwritten program line {i + 1}.", fontsize=12, color=(0.05, 0.05, 0.4))
+    scan_bytes = sp.get_pixmap(matrix=fitz.Matrix(2, 2)).tobytes("png")
+    src.close()
+
+    logo_src = fitz.open()
+    lp = logo_src.new_page(width=22, height=22)
+    lp.draw_rect(fitz.Rect(0, 0, 22, 22), fill=(0.1, 0.6, 0.5))
+    lp.insert_text((3, 15), "CS", fontsize=11, color=(1, 1, 1))
+    logo_bytes = lp.get_pixmap(matrix=fitz.Matrix(3, 3)).tobytes("png")
+    logo_src.close()
+
+    doc = fitz.open()
+    page = doc.new_page(width=595, height=842)
+    # Main scan first (as the base layer)...
+    page.insert_image(fitz.Rect(0, 0, 595, 842), stream=scan_bytes)
+    # ...then the logo as a genuinely separate image object on top.
+    page.insert_image(fitz.Rect(560, 810, 585, 833), stream=logo_bytes)
+    data = doc.tobytes()
+    doc.close()
+    return data
+
+
+def test_manual_removal_deletes_separate_overlay_logo_not_just_inpaints_scan() -> None:
+    """
+    Regression test for a real reported bug: when the watermark logo on
+    a scanned page is its own separate image object (not baked into the
+    scan), removal must delete that overlay image directly — inpainting
+    only the dominant scan image leaves a distinct object on top
+    completely untouched.
+    """
+    document_id = _upload(_build_scanned_pdf_with_separate_overlay_logo())
+
+    response = client.post(
+        f"/api/v1/documents/{document_id}/manual-remove",
+        json={"regions": [{"page": 1, "x0": 0.93, "y0": 0.95, "x1": 0.995, "y1": 0.99}]},
+    )
+    assert response.status_code == 200
+
+    download_response = client.get(f"/api/v1/documents/{document_id}/download")
+    cleaned = fitz.open(stream=download_response.content, filetype="pdf")
+    page = cleaned[0]
+
+    # The overlay logo must be visually gone (deleted via replace_image
+    # with a transparent pixmap, not object-count removal — the object
+    # may still technically exist but renders nothing).
+    logo_area_pix = page.get_pixmap(clip=fitz.Rect(555, 805, 590, 838))
+    samples = logo_area_pix.samples
+    has_teal_pixels = any(
+        samples[i] < 60 and samples[i + 1] > 120 and samples[i + 2] > 100 for i in range(0, len(samples), logo_area_pix.n)
+    )
+    assert not has_teal_pixels, "overlay logo is still visually present"
+    # The scan itself (and the rest of the page) must be untouched —
+    # check for dark ink pixels in the body-text area (this is a
+    # scanned page, so the text lives in pixels, not extractable text).
+    body_pix = page.get_pixmap(clip=fitz.Rect(30, 50, 400, 100))
+    assert any(b < 120 for b in body_pix.samples), "body text region appears blank"
+    cleaned.close()
+
+

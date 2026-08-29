@@ -15,7 +15,12 @@ page:
   the whole page over a small watermark stamp. Instead, the selected
   region is masked and filled with OpenCV inpainting (see
   inpainting.py), and the restored image replaces the original at the
-  same xref -- everything else about the page is untouched.
+  same xref -- everything else about the page is untouched. Separately,
+  any *small* overlay image within the selection (e.g. a logo layered
+  on top of the scan as its own image object, rather than baked into
+  the scan's pixels — confirmed on a real CamScanner export) is deleted
+  outright via precise per-object redaction, since inpainting the scan
+  underneath it wouldn't touch a distinct object drawn on top.
 
 Both paths run inside the same PyMuPDF document pass (one open, one
 save), for the same reason Phase 4's combined remover does: an
@@ -113,6 +118,49 @@ def _redact_page(page: "fitz.Page", regions: list[ManualRegion], page_width: flo
 
 
 def _inpaint_page(pdf: "fitz.Document", page: "fitz.Page", xref: int, regions: list[ManualRegion]) -> None:
+    # Order and method matter here, both confirmed by direct testing:
+    # apply_redactions() silently corrupts *other* images on the same
+    # page -- even ones it was never asked to touch -- immediately
+    # within the same session, well before any save. A page with a
+    # dominant scan (xref A) and a small logo (xref B) lost BOTH images
+    # after redacting only B. replace_image()-based calls don't have
+    # this problem: they only affect the xref they're given. So overlay
+    # removal here uses delete_image() (built on replace_image, not
+    # redaction) instead of add_redact_annot()/apply_redactions().
+
+    # Step 1: delete any SEPARATE small image overlapping the selection.
+    # Confirmed directly on a real CamScanner export: the visible logo
+    # is often its own small image object layered on top of the main
+    # scan, not baked into the scan's pixels -- inpainting the dominant
+    # image alone leaves such a logo completely untouched, since it's a
+    # distinct object drawn on top. Small overlay images are safe to
+    # clear this way; they're nowhere near large enough to trip
+    # MAX_REDACTABLE_IMAGE_COVERAGE.
+    page_area = page.rect.width * page.rect.height
+    region_rects = [
+        fitz.Rect(r.x0 * page.rect.width, r.y0 * page.rect.height, r.x1 * page.rect.width, r.y1 * page.rect.height)
+        for r in regions
+    ]
+
+    if page_area > 0:
+        for image_info in page.get_image_info(xrefs=True):
+            overlay_xref = image_info.get("xref")
+            if not overlay_xref or overlay_xref == xref:
+                continue
+            bbox = image_info.get("bbox")
+            if not bbox:
+                continue
+            image_rect = fitz.Rect(bbox)
+            coverage = (image_rect.width * image_rect.height) / page_area
+            if coverage > MAX_REDACTABLE_IMAGE_COVERAGE:
+                continue  # not a small overlay -- leave it alone here
+            if not any(image_rect.intersects(region_rect) for region_rect in region_rects):
+                continue
+            page.delete_image(overlay_xref)
+
+    # Step 2: inpaint the dominant scan image for the selected region(s),
+    # in case any part of the watermark is baked directly into the scan
+    # itself rather than (or in addition to) a separate overlay image.
     base = pdf.extract_image(xref)
     image = decode_image(base["image"])
     height, width = image.shape[:2]

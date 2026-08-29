@@ -1,5 +1,5 @@
-import { AlertTriangle, ChevronLeft, ChevronRight, Eraser, Undo2, Wand2 } from "lucide-react";
-import { useRef, useState } from "react";
+import { AlertTriangle, ChevronLeft, ChevronRight, Eraser, Loader2, Undo2, Wand2 } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 
 import { previewUrl } from "../services/api";
 import type { ManualRegion } from "../types/document";
@@ -28,19 +28,87 @@ export function ManualSelectionCanvas({ documentId, pageCount, scannedPages, onS
   const [applyToAllPages, setApplyToAllPages] = useState(false);
   const [dragStart, setDragStart] = useState<PixelPoint | null>(null);
   const [dragCurrent, setDragCurrent] = useState<PixelPoint | null>(null);
+  const [imageLoaded, setImageLoaded] = useState(false);
   // Bust the browser cache after a removal changes what the page looks like.
   const [previewVersion, setPreviewVersion] = useState(0);
   const imageRef = useRef<HTMLImageElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  // A tiny watermark logo (the exact case that motivated this fix) is
+  // often tucked right in a corner of the page — a completely normal
+  // drag toward it easily crosses the image's edge. Tracking on
+  // `window` instead of just the container means the drag keeps
+  // working even once the cursor leaves the image bounds; the
+  // coordinates themselves are still clamped to the image edges below.
+  useEffect(() => {
+    if (!dragStart) return;
+
+    const toRelativePoint = (clientX: number, clientY: number): PixelPoint | null => {
+      const rect = imageRef.current?.getBoundingClientRect();
+      if (!rect || rect.width === 0 || rect.height === 0) return null;
+      const x = Math.min(Math.max(clientX - rect.left, 0), rect.width);
+      const y = Math.min(Math.max(clientY - rect.top, 0), rect.height);
+      return { x: x / rect.width, y: y / rect.height };
+    };
+
+    const handleWindowMouseMove = (event: MouseEvent) => {
+      const point = toRelativePoint(event.clientX, event.clientY);
+      if (point) setDragCurrent(point);
+    };
+
+    const handleWindowMouseUp = (event: MouseEvent) => {
+      const point = toRelativePoint(event.clientX, event.clientY) ?? dragCurrent;
+      if (point && dragStart) {
+        const x0 = Math.min(dragStart.x, point.x);
+        const y0 = Math.min(dragStart.y, point.y);
+        const x1 = Math.max(dragStart.x, point.x);
+        const y1 = Math.max(dragStart.y, point.y);
+        // Ignore accidental clicks/tiny drags, not legitimately small
+        // (but deliberate) selections around a small logo/icon.
+        if (x1 - x0 > 0.006 && y1 - y0 > 0.006) {
+          setRegions((prev) => [...prev, { page: currentPage, x0, y0, x1, y1 }]);
+        }
+      }
+      setDragStart(null);
+      setDragCurrent(null);
+    };
+
+    window.addEventListener("mousemove", handleWindowMouseMove);
+    window.addEventListener("mouseup", handleWindowMouseUp);
+    return () => {
+      window.removeEventListener("mousemove", handleWindowMouseMove);
+      window.removeEventListener("mouseup", handleWindowMouseUp);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dragStart, currentPage]);
+
+  // Preload the neighboring pages so Next/Prev feels instant once the
+  // browser already has the image cached, instead of waiting on a
+  // fresh render + network round trip every click.
+  useEffect(() => {
+    const preload = (page: number) => {
+      if (page < 1 || page > pageCount) return;
+      const img = new Image();
+      img.src = `${previewUrl(documentId, page)}?v=${previewVersion}`;
+    };
+    preload(currentPage + 1);
+    preload(currentPage - 1);
+  }, [currentPage, pageCount, documentId, previewVersion]);
+
+  useEffect(() => {
+    setImageLoaded(false);
+  }, [currentPage, previewVersion]);
 
   const getRelativePoint = (event: React.MouseEvent<HTMLDivElement>): PixelPoint | null => {
     const rect = imageRef.current?.getBoundingClientRect();
-    if (!rect) return null;
+    if (!rect || rect.width === 0 || rect.height === 0) return null;
     const x = Math.min(Math.max(event.clientX - rect.left, 0), rect.width);
     const y = Math.min(Math.max(event.clientY - rect.top, 0), rect.height);
-    return { x: x / rect.width, y: y / rect.height }; // already fractional
+    return { x: x / rect.width, y: y / rect.height };
   };
 
   const handleMouseDown = (event: React.MouseEvent<HTMLDivElement>) => {
+    if (!imageLoaded) return;
     const point = getRelativePoint(event);
     if (point) {
       setDragStart(point);
@@ -48,29 +116,14 @@ export function ManualSelectionCanvas({ documentId, pageCount, scannedPages, onS
     }
   };
 
-  const handleMouseMove = (event: React.MouseEvent<HTMLDivElement>) => {
-    if (!dragStart) return;
-    const point = getRelativePoint(event);
-    if (point) setDragCurrent(point);
-  };
-
-  const handleMouseUp = () => {
-    if (dragStart && dragCurrent) {
-      const x0 = Math.min(dragStart.x, dragCurrent.x);
-      const y0 = Math.min(dragStart.y, dragCurrent.y);
-      const x1 = Math.max(dragStart.x, dragCurrent.x);
-      const y1 = Math.max(dragStart.y, dragCurrent.y);
-      // Ignore accidental clicks/tiny drags.
-      if (x1 - x0 > 0.01 && y1 - y0 > 0.01) {
-        setRegions((prev) => [...prev, { page: currentPage, x0, y0, x1, y1 }]);
-      }
-    }
-    setDragStart(null);
-    setDragCurrent(null);
-  };
-
   const undoLast = () => setRegions((prev) => prev.slice(0, -1));
   const clearAll = () => setRegions([]);
+
+  const goToPage = (page: number) => {
+    if (page >= 1 && page <= pageCount) {
+      setCurrentPage(page);
+    }
+  };
 
   const regionsOnCurrentPage = regions.filter((r) => r.page === currentPage);
   const isCurrentPageScanned = scannedPages.has(currentPage);
@@ -101,28 +154,28 @@ export function ManualSelectionCanvas({ documentId, pageCount, scannedPages, onS
   };
 
   return (
-    <div className="mt-4 rounded-xl border border-ink/10 bg-white p-4">
+    <div className="mt-4 rounded-2xl border border-ink/10 bg-white p-4">
       <div className="mb-2 flex items-center justify-between">
         <p className="text-sm font-medium text-ink">Manually select an area to remove</p>
         {pageCount > 1 && (
-          <div className="flex items-center gap-2 text-sm text-ink/60">
+          <div className="flex items-center gap-1 text-sm text-ink/60">
             <button
               type="button"
-              onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+              onClick={() => goToPage(currentPage - 1)}
               disabled={currentPage <= 1}
-              className="rounded p-1 hover:bg-ink/5 disabled:opacity-30"
+              className="rounded-lg p-1.5 hover:bg-ink/5 disabled:opacity-30"
               aria-label="Previous page"
             >
               <ChevronLeft className="h-4 w-4" />
             </button>
-            <span>
+            <span className="min-w-[5.5rem] text-center tabular-nums">
               Page {currentPage} of {pageCount}
             </span>
             <button
               type="button"
-              onClick={() => setCurrentPage((p) => Math.min(pageCount, p + 1))}
+              onClick={() => goToPage(currentPage + 1)}
               disabled={currentPage >= pageCount}
-              className="rounded p-1 hover:bg-ink/5 disabled:opacity-30"
+              className="rounded-lg p-1.5 hover:bg-ink/5 disabled:opacity-30"
               aria-label="Next page"
             >
               <ChevronRight className="h-4 w-4" />
@@ -133,38 +186,41 @@ export function ManualSelectionCanvas({ documentId, pageCount, scannedPages, onS
 
       <p className="mb-3 text-xs text-ink/50">
         Drag a box over anything to remove — text, images, or logos automatic detection might have missed.
+        Works right up to the edge of the page, so corner logos are easy to catch.
       </p>
 
       <div
-        className="relative inline-block max-w-full cursor-crosshair select-none overflow-hidden rounded-lg border border-ink/10"
+        ref={containerRef}
+        className="relative inline-block max-w-full cursor-crosshair select-none overflow-hidden rounded-xl border border-ink/10 bg-ink/[0.03]"
         onMouseDown={handleMouseDown}
-        onMouseMove={handleMouseMove}
-        onMouseUp={handleMouseUp}
-        onMouseLeave={() => {
-          setDragStart(null);
-          setDragCurrent(null);
-        }}
       >
+        {!imageLoaded && (
+          <div className="flex h-64 w-full items-center justify-center text-ink/30">
+            <Loader2 className="h-6 w-6 animate-spin" aria-hidden="true" />
+          </div>
+        )}
         <img
           ref={imageRef}
           src={`${previewUrl(documentId, currentPage)}?v=${previewVersion}`}
           alt={`Page ${currentPage} preview`}
-          className="block max-w-full"
+          className={`block max-w-full ${imageLoaded ? "" : "hidden"}`}
           draggable={false}
+          onLoad={() => setImageLoaded(true)}
         />
 
-        {regionsOnCurrentPage.map((region, index) => (
-          <div
-            key={index}
-            className="absolute border-2 border-accent bg-accent/20"
-            style={{
-              left: `${region.x0 * 100}%`,
-              top: `${region.y0 * 100}%`,
-              width: `${(region.x1 - region.x0) * 100}%`,
-              height: `${(region.y1 - region.y0) * 100}%`,
-            }}
-          />
-        ))}
+        {imageLoaded &&
+          regionsOnCurrentPage.map((region, index) => (
+            <div
+              key={index}
+              className="absolute border-2 border-accent bg-accent/20"
+              style={{
+                left: `${region.x0 * 100}%`,
+                top: `${region.y0 * 100}%`,
+                width: `${(region.x1 - region.x0) * 100}%`,
+                height: `${(region.y1 - region.y0) * 100}%`,
+              }}
+            />
+          ))}
 
         {dragRect && (
           <div
@@ -192,7 +248,7 @@ export function ManualSelectionCanvas({ documentId, pageCount, scannedPages, onS
       </div>
 
       {largeRegionOnScannedPage && (
-        <div className="mt-3 flex items-start gap-2 rounded-lg bg-warn/5 p-3 text-sm text-warn">
+        <div className="mt-3 flex items-start gap-2 rounded-xl bg-warn/5 p-3 text-sm text-warn">
           <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
           <p>
             This is a scanned page and your selection covers a large area. Removing it can't recover
@@ -207,16 +263,16 @@ export function ManualSelectionCanvas({ documentId, pageCount, scannedPages, onS
           type="button"
           onClick={handleSubmit}
           disabled={regions.length === 0 || isSubmitting}
-          className="inline-flex items-center gap-2 rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent/90 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:cursor-not-allowed disabled:opacity-50"
+          className="inline-flex items-center gap-2 rounded-xl bg-teal-600 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-teal-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-teal-400 disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-ink/50 disabled:shadow-none"
         >
-          <Wand2 className="h-4 w-4" aria-hidden="true" />
+          {isSubmitting ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" /> : <Wand2 className="h-4 w-4" aria-hidden="true" />}
           Remove selected area{regions.length === 1 ? "" : "s"} {regions.length > 0 && `(${regions.length})`}
         </button>
         <button
           type="button"
           onClick={undoLast}
           disabled={regions.length === 0}
-          className="inline-flex items-center gap-2 rounded-lg border border-ink/15 px-3 py-2 text-sm text-ink hover:bg-ink/5 disabled:cursor-not-allowed disabled:opacity-40"
+          className="inline-flex items-center gap-2 rounded-xl border border-ink/10 px-3 py-2 text-sm text-ink/70 hover:bg-ink/[0.03] disabled:cursor-not-allowed disabled:opacity-40"
         >
           <Undo2 className="h-4 w-4" aria-hidden="true" />
           Undo
@@ -225,7 +281,7 @@ export function ManualSelectionCanvas({ documentId, pageCount, scannedPages, onS
           type="button"
           onClick={clearAll}
           disabled={regions.length === 0}
-          className="inline-flex items-center gap-2 rounded-lg border border-ink/15 px-3 py-2 text-sm text-ink hover:bg-ink/5 disabled:cursor-not-allowed disabled:opacity-40"
+          className="inline-flex items-center gap-2 rounded-xl border border-ink/10 px-3 py-2 text-sm text-ink/70 hover:bg-ink/[0.03] disabled:cursor-not-allowed disabled:opacity-40"
         >
           <Eraser className="h-4 w-4" aria-hidden="true" />
           Clear

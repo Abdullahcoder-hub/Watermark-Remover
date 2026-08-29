@@ -17,9 +17,9 @@ function confidenceLabel(confidence: number): { label: string; className: string
 export function CandidateList({ candidates, selectedIds, onToggle }: CandidateListProps) {
   if (candidates.length === 0) {
     return (
-      <div className="mt-4 flex items-start gap-2 rounded-lg bg-ink/[0.03] p-4 text-sm text-ink/60">
+      <div className="mt-4 flex items-start gap-2 rounded-xl bg-ink/[0.03] p-4 text-sm text-ink/60">
         <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
-        <p>No watermark candidates were detected. You can still inspect the document manually — manual selection tools arrive in a later phase.</p>
+        <p>No watermark candidates were detected automatically. You can still select an area manually below if something's visible.</p>
       </div>
     );
   }
@@ -35,7 +35,11 @@ export function CandidateList({ candidates, selectedIds, onToggle }: CandidateLi
           return (
             <label
               key={candidate.candidate_id}
-              className="flex cursor-pointer items-start gap-3 rounded-lg border border-ink/10 bg-white p-3 hover:border-accent/40"
+              className={`flex cursor-pointer items-start gap-3 rounded-xl border p-3 transition-colors ${
+                selectedIds.has(candidate.candidate_id)
+                  ? "border-accent/30 bg-accent/[0.04]"
+                  : "border-ink/10 bg-white hover:border-accent/30"
+              }`}
             >
               <input
                 type="checkbox"

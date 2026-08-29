@@ -56,13 +56,24 @@ def test_automatic_detection_misses_vector_icon() -> None:
     assert not any(c["type"] == "image" for c in candidates)
 
 
-def test_preview_returns_png_image() -> None:
+def test_preview_returns_jpeg_image() -> None:
     document_id = _upload(_build_camscanner_style_pdf())
 
     response = client.get(f"/api/v1/documents/{document_id}/preview/1")
     assert response.status_code == 200
-    assert response.headers["content-type"] == "image/png"
-    assert response.content[:8] == b"\x89PNG\r\n\x1a\n"  # PNG magic bytes
+    assert response.headers["content-type"] == "image/jpeg"
+    assert response.content[:2] == b"\xff\xd8"  # JPEG magic bytes
+
+
+def test_preview_second_request_is_served_from_cache() -> None:
+    """Repeat views of an unchanged page should be near-instant, not re-rendered."""
+    document_id = _upload(_build_camscanner_style_pdf())
+
+    first = client.get(f"/api/v1/documents/{document_id}/preview/1")
+    second = client.get(f"/api/v1/documents/{document_id}/preview/1")
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.content == second.content
 
 
 def test_preview_invalid_page_returns_error() -> None:

@@ -59,7 +59,7 @@ export function UploadArea({ onFileSelected, disabled }: UploadAreaProps) {
         }}
         onDragLeave={() => setIsDragging(false)}
         onDrop={handleDrop}
-        className={`flex flex-col items-center justify-center gap-3 rounded-xl border-2 border-dashed p-12 text-center transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-accent ${
+        className={`flex flex-col items-center justify-center gap-3 rounded-2xl border-2 border-dashed p-12 text-center transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-accent ${
           disabled
             ? "cursor-not-allowed border-ink/10 bg-ink/[0.02] opacity-60"
             : isDragging
