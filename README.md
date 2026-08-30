@@ -2,11 +2,13 @@
 
 Privacy-first watermark removal for PDF documents you own or are authorized to modify.
 
-> **Status: Phase 6** — upload, validation, temporary storage, structural PDF analysis, automatic
+> **Status: Phase 7** — upload, validation, temporary storage, structural PDF analysis, automatic
 > text watermark removal (Case A), automatic image watermark removal (Case B), manual region selection
-> for anything automatic detection can't see, and full scanned-PDF handling (Case C): watermark removal
-> via OpenCV inpainting instead of destructive redaction, plus optional OCR to make scanned pages
-> searchable. A richer in-app before/after preview lands in Phase 7 (see `Development Strategy` in the
+> for anything automatic detection can't see, full scanned-PDF handling (Case C) via OpenCV inpainting
+> plus optional OCR, an in-app before/after comparison view (with zoom and page navigation) so you
+> never have to download just to check the result, an explicit delete endpoint, and an automatic
+> background sweep that deletes documents past their retention window. Security hardening, rate
+> limiting, and production deployment are the remaining phases (see `Development Strategy` in the
 > project spec).
 
 ## Stack
@@ -21,7 +23,8 @@ Privacy-first watermark removal for PDF documents you own or are authorized to m
 document-cleaner/
 ├── frontend/           React app (upload, analysis, detection, automatic & manual removal, OCR UI)
 │   └── src/
-│       ├── components/ UploadArea, ProgressBar, AnalysisSummary, CandidateList, ManualSelectionCanvas
+│       ├── components/ UploadArea, ProgressBar, AnalysisSummary, CandidateList,
+│       │               ManualSelectionCanvas, BeforeAfterView
 │       ├── pages/      Home
 │       ├── hooks/      useDocumentUpload, useDocumentAnalysis, useWatermarkDetection,
 │       │               useWatermarkProcessing, useManualRemoval, useOcr
@@ -30,18 +33,19 @@ document-cleaner/
 │       └── utils/      client-side validation helpers
 ├── backend/             FastAPI app
 │   ├── app/
-│   │   ├── main.py      app entrypoint, CORS, global error handler
+│   │   ├── main.py      app entrypoint, CORS, global error handler, background cleanup task
 │   │   ├── config.py     env-driven settings
 │   │   ├── api/          documents.py (upload, analyze, status, detect, process, download,
-│   │   │                 preview, manual-remove, ocr), health.py
+│   │   │                 preview [current/original], manual-remove, ocr, delete), health.py
 │   │   ├── schemas/      Pydantic request/response models (document, analysis, watermark,
 │   │   │                 processing, manual, ocr)
 │   │   ├── services/     pdf_analyzer.py, watermark_detector.py, text_remover.py, image_remover.py,
 │   │   │                 watermark_remover.py, manual_remover.py, scanned_detector.py, inpainting.py,
-│   │   │                 ocr_service.py
-│   │   └── utils/        file validation, in-memory document/analysis/detection stores
+│   │   │                 ocr_service.py, cleanup_service.py
+│   │   └── utils/        file validation, in-memory document/analysis/detection/preview stores
 │   └── tests/           pytest suite: upload validation, analysis, text + image watermark
-│                         detection & removal, manual selection, scanned-page inpainting + OCR
+│                         detection & removal, manual selection, scanned-page inpainting + OCR,
+│                         before/after preview, deletion, automatic cleanup
 ├── docker-compose.yml
 ├── .env.example
 └── .gitignore
@@ -256,15 +260,40 @@ pytest tests/ -v
     `test_manual_removal_on_margin_scan_page_uses_inpainting_not_redaction`,
     `test_automatic_process_refuses_to_delete_dominant_page_image`.
 
-## What Phase 6 does NOT do yet
+## How Phase 7 works
 
-- No side-by-side before/after comparison view — the page preview used for manual selection doubles
-  as a way to inspect the current state, but a dedicated before/after UI is Phase 7 work
+- **Before/after comparison** (`BeforeAfterView.tsx` + `GET /preview/{page}?version=original|current`):
+  the preview endpoint always rendered the document's *current* state; it now accepts a `version`
+  parameter so the frontend can also request the untouched original upload, regardless of how much
+  processing has happened since. Both render through the same PyMuPDF pipeline and preview cache
+  introduced in Phase 6 — the cache key already includes file mtime, so "original" and "current" never
+  collide even when they happen to be the same bytes (nothing processed yet). Shown side-by-side with
+  shared page navigation and a shared zoom control, right above the download button, so the person can
+  actually see whether the result looks right before committing to a download — matching the spec's
+  "do not force the user to download a document just to inspect the result."
+- **Automatic cleanup** (`cleanup_service.py`, wired into `main.py` via a `lifespan` background task):
+  a sweep runs every 5 minutes and deletes any document older than `FILE_RETENTION_MINUTES` (from
+  `.env`, default 30) — its uploaded file, its processed result, and every cached analysis/detection/
+  preview entry for it. A failed sweep is logged and retried on the next interval rather than crashing
+  the background task.
+- **Explicit deletion** (`DELETE /api/v1/documents/{id}`): for a person who wants their document gone
+  immediately rather than waiting for the retention window, calling the same underlying cleanup logic
+  as the periodic sweep.
+
+## What Phase 7 does NOT do yet
+
 - No background job queue (Redis/Celery) — not needed yet; processing is synchronous and fast enough
   for MVP PDFs (OCR is the slowest step, so its API call uses a longer client-side timeout)
-- No database — an in-memory store tracks documents, analysis, and detected candidates for this process's lifetime only
+- No database — an in-memory store tracks documents, analysis, and detected candidates for this
+  process's lifetime only; the retention sweep also means restarting the server loses everything
+  immediately rather than after the retention window, since the in-memory store itself doesn't survive
+  a restart
+- The before/after view compares by page image only — no pixel-diff highlighting of exactly what
+  changed, just the two renders side-by-side
 - OCR currently only bundles the English Tesseract language pack in the Docker image; other languages
   need their `tesseract-ocr-<lang>` package added to the Dockerfile
+- No security hardening (rate limiting, request size limits beyond the upload check, Docker filesystem
+  isolation for the worker) — that's Phase 8
 
 ## Security & privacy notes
 

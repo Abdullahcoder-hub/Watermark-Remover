@@ -100,8 +100,8 @@ export function downloadUrl(documentId: string): string {
   return `${API_BASE_URL}/api/v1/documents/${documentId}/download`;
 }
 
-export function previewUrl(documentId: string, page: number): string {
-  return `${API_BASE_URL}/api/v1/documents/${documentId}/preview/${page}`;
+export function previewUrl(documentId: string, page: number, version: "current" | "original" = "current"): string {
+  return `${API_BASE_URL}/api/v1/documents/${documentId}/preview/${page}?version=${version}`;
 }
 
 export async function manualRemove(

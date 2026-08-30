@@ -150,5 +150,16 @@ class PreviewCache:
             self._cache[key] = png_bytes
             self._order.append(key)
 
+    def delete_document(self, document_id: str) -> None:
+        """Remove every cached preview (any page, any version/mtime) for one document."""
+        with self._lock:
+            keys_to_remove = [key for key in self._cache if key[0] == document_id]
+            for key in keys_to_remove:
+                self._cache.pop(key, None)
+                try:
+                    self._order.remove(key)
+                except ValueError:
+                    pass
+
 
 preview_cache = PreviewCache()

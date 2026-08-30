@@ -2,6 +2,7 @@ import { CheckCircle2, Download, Loader2, MousePointerSquareDashed, RotateCcw, S
 import { useEffect, useState } from "react";
 
 import { AnalysisSummary } from "../components/AnalysisSummary";
+import { BeforeAfterView } from "../components/BeforeAfterView";
 import { CandidateList } from "../components/CandidateList";
 import { ManualSelectionCanvas } from "../components/ManualSelectionCanvas";
 import { ProgressBar } from "../components/ProgressBar";
@@ -299,6 +300,10 @@ export function Home() {
                   </div>
                 )}
               </div>
+            )}
+
+            {hasCleanedResult && result.page_count !== null && (
+              <BeforeAfterView documentId={result.document_id} pageCount={result.page_count} />
             )}
 
             {hasCleanedResult && (

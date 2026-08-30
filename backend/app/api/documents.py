@@ -30,6 +30,7 @@ from app.schemas.manual import ManualRemovalRequest, ManualRemovalResponse
 from app.schemas.ocr import OcrPageResult, OcrRequest, OcrResponse
 from app.schemas.processing import ProcessRequest, ProcessResponse
 from app.schemas.watermark import DetectionResponse, WatermarkCandidate
+from app.services.cleanup_service import delete_document
 from app.services.image_remover import ImageRemovalError
 from app.services.manual_remover import ManualRemovalError, remove_manual_regions
 from app.services.ocr_service import OcrError, add_ocr_text_layer
@@ -324,12 +325,20 @@ PREVIEW_DPI = 120
 
 
 @router.get("/{document_id}/preview/{page_number}")
-async def preview_page(document_id: str, page_number: int) -> Response:
+async def preview_page(document_id: str, page_number: int, version: str = "current") -> Response:
     record = document_store.get(document_id)
     if record is None:
         raise _api_error(404, "DOCUMENT_NOT_FOUND", "No document was found with that ID.")
 
-    source_path = _current_source_path(record)
+    if version not in ("current", "original"):
+        raise _api_error(400, "INVALID_VERSION", "version must be 'current' or 'original'.")
+
+    # "original" always renders the untouched upload, regardless of
+    # what processing has happened since — this is what makes a real
+    # before/after comparison possible. "current" (the default) is
+    # whatever state the document is actually in right now, same as
+    # before this parameter existed.
+    source_path = Path(record.stored_path) if version == "original" else _current_source_path(record)
 
     try:
         mtime = source_path.stat().st_mtime
@@ -357,7 +366,7 @@ async def preview_page(document_id: str, page_number: int) -> Response:
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001 - any PyMuPDF failure means the file couldn't be rendered
-        logger.error("preview_failed job_id=%s page=%s", document_id, page_number)
+        logger.error("preview_failed job_id=%s page=%s version=%s", document_id, page_number, version)
         raise _api_error(500, "PREVIEW_FAILED", "This page could not be rendered.") from exc
 
     preview_cache.set(document_id, page_number, mtime, image_bytes)
@@ -474,3 +483,19 @@ async def ocr_document(document_id: str, request: OcrRequest) -> OcrResponse:
         document_id=document_id,
         pages_ocred=[OcrPageResult(page=page, words_added=count) for page, count in sorted(words_by_page.items())],
     )
+
+
+@router.delete("/{document_id}")
+async def delete_document_route(document_id: str) -> dict:
+    """
+    Explicit, immediate deletion — for a user who wants their document
+    gone right away rather than waiting for the periodic retention
+    sweep (see cleanup_service.py / main.py's background task).
+    """
+    record = document_store.get(document_id)
+    if record is None:
+        raise _api_error(404, "DOCUMENT_NOT_FOUND", "No document was found with that ID.")
+
+    delete_document(record)
+
+    return {"success": True, "document_id": document_id, "status": "deleted"}
