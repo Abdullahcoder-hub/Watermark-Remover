@@ -113,5 +113,6 @@ export interface OcrResponse {
   document_id: string;
   status: string;
   pages_ocred: OcrPageResult[];
+  already_applied: boolean;
 }
 

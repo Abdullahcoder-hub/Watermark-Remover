@@ -440,6 +440,18 @@ async def ocr_document(document_id: str, request: OcrRequest) -> OcrResponse:
     if record is None:
         raise _api_error(404, "DOCUMENT_NOT_FOUND", "No document was found with that ID.")
 
+    # If OCR already ran on this document and the caller isn't
+    # explicitly targeting specific pages, don't re-run Tesseract at
+    # all. Relying only on "is this page still scanned" to detect
+    # "already OCR'd" isn't reliable — a page where recognition finds
+    # very few words can still measure under the scanned-text
+    # threshold even after OCR runs, which would otherwise silently
+    # re-process the same pages (wasted time, and on a slow connection
+    # a real risk of the request timing out, which surfaces to the
+    # user as a bare connection error instead of a clear message).
+    if record.ocr_applied and not request.pages:
+        return OcrResponse(document_id=document_id, pages_ocred=[], already_applied=True)
+
     source_path = _current_source_path(record)
 
     if request.pages:
@@ -459,7 +471,7 @@ async def ocr_document(document_id: str, request: OcrRequest) -> OcrResponse:
         # OCR must not unnecessarily modify a document that already
         # has usable text — the correct response is "nothing to do",
         # not a failure. Leave the document and caches untouched.
-        return OcrResponse(document_id=document_id, pages_ocred=[])
+        return OcrResponse(document_id=document_id, pages_ocred=[], already_applied=record.ocr_applied)
 
     try:
         ocr_bytes, words_by_page = add_ocr_text_layer(source_path, target_pages)
@@ -475,6 +487,7 @@ async def ocr_document(document_id: str, request: OcrRequest) -> OcrResponse:
 
     document_store.set_result_path(document_id, str(result_path))
     document_store.set_status(document_id, "processed")
+    document_store.set_ocr_applied(document_id, True)
     analysis_store.delete(document_id)  # page text content changed; cached analysis is now stale
 
     logger.info("ocr_success job_id=%s pages=%s", document_id, list(words_by_page.keys()))

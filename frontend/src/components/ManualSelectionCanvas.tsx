@@ -1,4 +1,4 @@
-import { AlertTriangle, ChevronLeft, ChevronRight, Eraser, Loader2, Undo2, Wand2 } from "lucide-react";
+import { AlertTriangle, ChevronLeft, ChevronRight, Eraser, Loader2, Undo2, Wand2, ZoomIn, ZoomOut } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
 import { previewUrl } from "../services/api";
@@ -22,6 +22,12 @@ interface PixelPoint {
 // submitting, not just from the rejection after the fact.
 const LARGE_SELECTION_WARNING_THRESHOLD = 0.15;
 
+// Zoom presets for precisely targeting small watermarks (e.g. a
+// corner logo just a few percent of the page) — at 100% a tiny icon
+// can be only a few screen pixels wide, making it easy to miss or
+// mis-drag; zooming in gives real room to draw an accurate box.
+const ZOOM_LEVELS = [1, 1.5, 2, 3];
+
 export function ManualSelectionCanvas({ documentId, pageCount, scannedPages, onSubmit, isSubmitting }: ManualSelectionCanvasProps) {
   const [currentPage, setCurrentPage] = useState(1);
   const [regions, setRegions] = useState<ManualRegion[]>([]);
@@ -29,6 +35,8 @@ export function ManualSelectionCanvas({ documentId, pageCount, scannedPages, onS
   const [dragStart, setDragStart] = useState<PixelPoint | null>(null);
   const [dragCurrent, setDragCurrent] = useState<PixelPoint | null>(null);
   const [imageLoaded, setImageLoaded] = useState(false);
+  const [zoomIndex, setZoomIndex] = useState(0);
+  const [naturalSize, setNaturalSize] = useState<{ width: number; height: number } | null>(null);
   // Bust the browser cache after a removal changes what the page looks like.
   const [previewVersion, setPreviewVersion] = useState(0);
   const imageRef = useRef<HTMLImageElement>(null);
@@ -89,7 +97,7 @@ export function ManualSelectionCanvas({ documentId, pageCount, scannedPages, onS
     const preload = (page: number) => {
       if (page < 1 || page > pageCount) return;
       const img = new Image();
-      img.src = `${previewUrl(documentId, page)}?v=${previewVersion}`;
+      img.src = previewUrl(documentId, page, "current", previewVersion);
     };
     preload(currentPage + 1);
     preload(currentPage - 1);
@@ -97,6 +105,7 @@ export function ManualSelectionCanvas({ documentId, pageCount, scannedPages, onS
 
   useEffect(() => {
     setImageLoaded(false);
+    setNaturalSize(null);
   }, [currentPage, previewVersion]);
 
   const getRelativePoint = (event: React.MouseEvent<HTMLDivElement>): PixelPoint | null => {
@@ -155,43 +164,68 @@ export function ManualSelectionCanvas({ documentId, pageCount, scannedPages, onS
 
   return (
     <div className="mt-4 rounded-2xl border border-ink/10 bg-white p-4">
-      <div className="mb-2 flex items-center justify-between">
+      <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
         <p className="text-sm font-medium text-ink">Manually select an area to remove</p>
-        {pageCount > 1 && (
-          <div className="flex items-center gap-1 text-sm text-ink/60">
+        <div className="flex items-center gap-3">
+          {pageCount > 1 && (
+            <div className="flex items-center gap-1 text-sm text-ink/60">
+              <button
+                type="button"
+                onClick={() => goToPage(currentPage - 1)}
+                disabled={currentPage <= 1}
+                className="rounded-lg p-1.5 hover:bg-ink/5 disabled:opacity-30"
+                aria-label="Previous page"
+              >
+                <ChevronLeft className="h-4 w-4" />
+              </button>
+              <span className="min-w-[5.5rem] text-center tabular-nums">
+                Page {currentPage} of {pageCount}
+              </span>
+              <button
+                type="button"
+                onClick={() => goToPage(currentPage + 1)}
+                disabled={currentPage >= pageCount}
+                className="rounded-lg p-1.5 hover:bg-ink/5 disabled:opacity-30"
+                aria-label="Next page"
+              >
+                <ChevronRight className="h-4 w-4" />
+              </button>
+            </div>
+          )}
+          <div className="flex items-center gap-1 border-l border-ink/10 pl-3 text-ink/60">
             <button
               type="button"
-              onClick={() => goToPage(currentPage - 1)}
-              disabled={currentPage <= 1}
+              onClick={() => setZoomIndex((z) => Math.max(0, z - 1))}
+              disabled={zoomIndex === 0}
               className="rounded-lg p-1.5 hover:bg-ink/5 disabled:opacity-30"
-              aria-label="Previous page"
+              aria-label="Zoom out"
             >
-              <ChevronLeft className="h-4 w-4" />
+              <ZoomOut className="h-4 w-4" />
             </button>
-            <span className="min-w-[5.5rem] text-center tabular-nums">
-              Page {currentPage} of {pageCount}
-            </span>
+            <span className="min-w-[3rem] text-center text-sm tabular-nums">{Math.round(ZOOM_LEVELS[zoomIndex] * 100)}%</span>
             <button
               type="button"
-              onClick={() => goToPage(currentPage + 1)}
-              disabled={currentPage >= pageCount}
+              onClick={() => setZoomIndex((z) => Math.min(ZOOM_LEVELS.length - 1, z + 1))}
+              disabled={zoomIndex === ZOOM_LEVELS.length - 1}
               className="rounded-lg p-1.5 hover:bg-ink/5 disabled:opacity-30"
-              aria-label="Next page"
+              aria-label="Zoom in"
             >
-              <ChevronRight className="h-4 w-4" />
+              <ZoomIn className="h-4 w-4" />
             </button>
           </div>
-        )}
+        </div>
       </div>
 
       <p className="mb-3 text-xs text-ink/50">
         Drag a box over anything to remove — text, images, or logos automatic detection might have missed.
-        Works right up to the edge of the page, so corner logos are easy to catch.
+        Works right up to the edge of the page, so corner logos are easy to catch. Zoom in first for small
+        watermarks so you can draw a precise box.
       </p>
 
       <div
         ref={containerRef}
-        className="relative inline-block max-w-full cursor-crosshair select-none overflow-hidden rounded-xl border border-ink/10 bg-ink/[0.03]"
+        className="relative w-full cursor-crosshair select-none overflow-auto rounded-xl border border-ink/10 bg-ink/[0.03]"
+        style={{ maxHeight: "70vh" }}
         onMouseDown={handleMouseDown}
       >
         {!imageLoaded && (
@@ -199,17 +233,33 @@ export function ManualSelectionCanvas({ documentId, pageCount, scannedPages, onS
             <Loader2 className="h-6 w-6 animate-spin" aria-hidden="true" />
           </div>
         )}
-        <img
-          ref={imageRef}
-          src={`${previewUrl(documentId, currentPage)}?v=${previewVersion}`}
-          alt={`Page ${currentPage} preview`}
-          className={`block max-w-full ${imageLoaded ? "" : "hidden"}`}
-          draggable={false}
-          onLoad={() => setImageLoaded(true)}
-        />
+        {/*
+          This inner wrapper is sized to exactly match the image's own
+          rendered (possibly zoomed) dimensions, via inline-block
+          shrink-to-fit. The selection overlays below are positioned
+          with percentages relative to THIS wrapper, not the outer
+          scrollable container — otherwise, once the image is taller
+          than the container's max-height, percentages would resolve
+          against the container's clipped visible height instead of
+          the image's true size, making overlays land in the wrong
+          place the moment the user scrolls a zoomed-in page.
+        */}
+        <div className={`relative inline-block ${imageLoaded ? "" : "hidden"}`}>
+          <img
+            ref={imageRef}
+            src={previewUrl(documentId, currentPage, "current", previewVersion)}
+            alt={`Page ${currentPage} preview`}
+            className="block"
+            style={{ width: naturalSize ? `${naturalSize.width * ZOOM_LEVELS[zoomIndex]}px` : "auto" }}
+            draggable={false}
+            onLoad={(e) => {
+              const el = e.currentTarget;
+              setNaturalSize({ width: el.naturalWidth, height: el.naturalHeight });
+              setImageLoaded(true);
+            }}
+          />
 
-        {imageLoaded &&
-          regionsOnCurrentPage.map((region, index) => (
+          {regionsOnCurrentPage.map((region, index) => (
             <div
               key={index}
               className="absolute border-2 border-accent bg-accent/20"
@@ -222,17 +272,18 @@ export function ManualSelectionCanvas({ documentId, pageCount, scannedPages, onS
             />
           ))}
 
-        {dragRect && (
-          <div
-            className="pointer-events-none absolute border-2 border-dashed border-warn bg-warn/10"
-            style={{
-              left: `${dragRect.x0 * 100}%`,
-              top: `${dragRect.y0 * 100}%`,
-              width: `${(dragRect.x1 - dragRect.x0) * 100}%`,
-              height: `${(dragRect.y1 - dragRect.y0) * 100}%`,
-            }}
-          />
-        )}
+          {dragRect && (
+            <div
+              className="pointer-events-none absolute border-2 border-dashed border-warn bg-warn/10"
+              style={{
+                left: `${dragRect.x0 * 100}%`,
+                top: `${dragRect.y0 * 100}%`,
+                width: `${(dragRect.x1 - dragRect.x0) * 100}%`,
+                height: `${(dragRect.y1 - dragRect.y0) * 100}%`,
+              }}
+            />
+          )}
+        </div>
       </div>
 
       <div className="mt-3 flex flex-wrap items-center gap-3">
@@ -263,7 +314,7 @@ export function ManualSelectionCanvas({ documentId, pageCount, scannedPages, onS
           type="button"
           onClick={handleSubmit}
           disabled={regions.length === 0 || isSubmitting}
-          className="inline-flex items-center gap-2 rounded-xl bg-teal-600 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-teal-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-teal-400 disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-ink/50 disabled:shadow-none"
+          className="inline-flex items-center gap-2 rounded-xl bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent/90 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:cursor-not-allowed disabled:opacity-50"
         >
           {isSubmitting ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" /> : <Wand2 className="h-4 w-4" aria-hidden="true" />}
           Remove selected area{regions.length === 1 ? "" : "s"} {regions.length > 0 && `(${regions.length})`}

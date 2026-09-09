@@ -21,3 +21,9 @@ class OcrResponse(BaseModel):
     document_id: str
     status: str = "processed"
     pages_ocred: list[OcrPageResult]
+    # True when this call didn't run Tesseract at all because OCR was
+    # already applied to this document and no explicit page list was
+    # given — distinguishes "nothing to do, already searchable" from
+    # "ran OCR and genuinely found nothing" for the frontend to show a
+    # clear message instead of a generic error.
+    already_applied: bool = False

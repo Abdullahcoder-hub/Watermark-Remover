@@ -191,15 +191,23 @@ export function Home() {
                   ) : (
                     <ScanText className="h-4 w-4" aria-hidden="true" />
                   )}
-                  Make this document searchable (OCR)
+                  {ocrStatus === "running" ? "Reading document…" : "Make this document searchable (OCR)"}
                 </button>
-                {ocrStatus === "error" && <p className="mt-2 text-sm text-warn">OCR failed: {ocrError}</p>}
+                {ocrStatus === "running" && (
+                  <p className="mt-2 text-xs text-ink/40">
+                    This can take a minute or more on longer scanned documents — no need to click again,
+                    it's still working.
+                  </p>
+                )}
+                {ocrStatus === "error" && <p className="mt-2 text-sm text-warn">{ocrError}</p>}
               </div>
             )}
 
             {ocrStatus === "success" && ocrResult && (
               <div className="mt-4 rounded-xl border border-accent/20 bg-white p-4">
-                {ocrResult.pages_ocred.length > 0 ? (
+                {ocrResult.already_applied ? (
+                  <p className="text-sm text-ink/60">This document is already searchable — OCR has already been applied.</p>
+                ) : ocrResult.pages_ocred.length > 0 ? (
                   <>
                     <p className="text-sm font-medium text-ink">Document is now searchable</p>
                     <p className="mt-1 text-xs text-ink/50">

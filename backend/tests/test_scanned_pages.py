@@ -239,17 +239,61 @@ def test_ocr_called_twice_is_graceful_second_time() -> None:
     """
     OCR itself adds a text layer, so a page that was scanned no longer
     looks scanned afterward. Calling OCR again must not error — it
-    should recognize there's nothing left to do.
+    should recognize there's nothing left to do, and say so explicitly
+    via already_applied rather than just returning an empty list that
+    looks identical to "ran OCR and found nothing new."
     """
     document_id = _upload(_build_scanned_pdf_with_stamp())
 
     first = client.post(f"/api/v1/documents/{document_id}/ocr", json={})
     assert first.status_code == 200
     assert len(first.json()["pages_ocred"]) == 1
+    assert first.json()["already_applied"] is False
 
     second = client.post(f"/api/v1/documents/{document_id}/ocr", json={})
     assert second.status_code == 200
     assert second.json()["pages_ocred"] == []
+    assert second.json()["already_applied"] is True
+
+
+def test_ocr_skips_reprocessing_even_when_page_still_reads_as_scanned() -> None:
+    """
+    Regression test for a real reported issue: a page where OCR
+    recognizes very few words can still measure under the
+    scanned-text-length threshold even after OCR runs, so relying only
+    on that heuristic would silently re-run Tesseract on every repeat
+    call instead of recognizing OCR was already applied. Simulated
+    here by monkeypatching recognition down to near-nothing on the
+    second pass would be complex; instead this directly asserts the
+    documented contract: once ocr_applied is set, a second call with
+    no explicit pages short-circuits regardless of analysis state.
+    """
+    document_id = _upload(_build_scanned_pdf_with_stamp())
+    client.post(f"/api/v1/documents/{document_id}/ocr", json={})
+
+    from app.utils.document_store import document_store
+
+    record = document_store.get(document_id)
+    assert record.ocr_applied is True
+
+    # Even if a fresh analysis would still call this page "scanned"
+    # (e.g. very little text got recognized), the endpoint must not
+    # re-run OCR once ocr_applied is set and no explicit pages are given.
+    second = client.post(f"/api/v1/documents/{document_id}/ocr", json={})
+    assert second.status_code == 200
+    assert second.json()["already_applied"] is True
+    assert second.json()["pages_ocred"] == []
+
+
+def test_ocr_explicit_pages_still_run_even_after_ocr_applied() -> None:
+    """A caller explicitly naming pages is a deliberate override and must still work."""
+    document_id = _upload(_build_scanned_pdf_with_stamp())
+    client.post(f"/api/v1/documents/{document_id}/ocr", json={})
+
+    response = client.post(f"/api/v1/documents/{document_id}/ocr", json={"pages": [1]})
+    assert response.status_code == 200
+    assert response.json()["already_applied"] is False
+    assert len(response.json()["pages_ocred"]) == 1
 
 
 def test_ocr_unknown_document_returns_404() -> None:

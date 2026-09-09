@@ -24,6 +24,13 @@ class DocumentRecord:
     status: str = "uploaded"
     stored_path: str = ""
     result_path: str = ""
+    # Tracks whether OCR has ever been successfully applied to this
+    # document (regardless of how few/many words were recognized).
+    # Needed because the "is this page scanned" heuristic isn't
+    # reliable enough to detect "already OCR'd" on its own — a page
+    # where Tesseract recognizes very few words can still measure
+    # under the scanned-text-length threshold even after OCR runs.
+    ocr_applied: bool = False
 
 
 class DocumentStore:
@@ -50,6 +57,12 @@ class DocumentStore:
             record = self._records.get(document_id)
             if record is not None:
                 record.result_path = result_path
+
+    def set_ocr_applied(self, document_id: str, applied: bool) -> None:
+        with self._lock:
+            record = self._records.get(document_id)
+            if record is not None:
+                record.ocr_applied = applied
 
     def delete(self, document_id: str) -> None:
         with self._lock:

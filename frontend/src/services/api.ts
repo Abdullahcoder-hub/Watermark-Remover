@@ -35,6 +35,18 @@ function toApiRequestError(error: unknown): ApiRequestError {
     return new ApiRequestError(detail.error.code, detail.error.message);
   }
 
+  // A timeout is not the same problem as "server unreachable" — OCR in
+  // particular can genuinely take a minute or more on a multi-page
+  // scanned document, and telling the user to "check your connection"
+  // when the real cause is just a slow operation is actively
+  // misleading (it reads as a network failure when nothing is wrong).
+  if (axiosError.code === "ECONNABORTED" || axiosError.message?.toLowerCase().includes("timeout")) {
+    return new ApiRequestError(
+      "TIMEOUT",
+      "This is taking longer than expected. Large or scanned documents can take a minute or more — please wait a moment and try again rather than clicking repeatedly.",
+    );
+  }
+
   return new ApiRequestError("NETWORK_ERROR", "Could not reach the server. Please check your connection and try again.");
 }
 
@@ -100,8 +112,14 @@ export function downloadUrl(documentId: string): string {
   return `${API_BASE_URL}/api/v1/documents/${documentId}/download`;
 }
 
-export function previewUrl(documentId: string, page: number, version: "current" | "original" = "current"): string {
-  return `${API_BASE_URL}/api/v1/documents/${documentId}/preview/${page}?version=${version}`;
+export function previewUrl(
+  documentId: string,
+  page: number,
+  version: "current" | "original" = "current",
+  cacheBust?: number,
+): string {
+  const base = `${API_BASE_URL}/api/v1/documents/${documentId}/preview/${page}?version=${version}`;
+  return cacheBust === undefined ? base : `${base}&v=${cacheBust}`;
 }
 
 export async function manualRemove(
@@ -122,11 +140,14 @@ export async function manualRemove(
 
 export async function runOcr(documentId: string): Promise<OcrResponse> {
   try {
-    // OCR can take a while on larger scans — give it more room than the default.
+    // OCR can genuinely take a while — measured ~35s for an 8-page
+    // scanned document; a longer one could take several minutes.
+    // Generous timeout so a slow-but-working request doesn't get
+    // mistaken for a connection failure.
     const response = await apiClient.post<OcrResponse>(
       `/api/v1/documents/${documentId}/ocr`,
       {},
-      { timeout: 120_000 },
+      { timeout: 300_000 },
     );
     return response.data;
   } catch (error) {
