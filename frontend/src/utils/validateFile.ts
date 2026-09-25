@@ -3,9 +3,13 @@
 // the actual security boundary.
 const MAX_SIZE_MB = 50;
 
+const ALLOWED_EXTENSIONS = [".pdf", ".pptx", ".ppt"];
+
 export function validatePdfClientSide(file: File): string | null {
-  if (!file.name.toLowerCase().endsWith(".pdf")) {
-    return "Only PDF files are supported.";
+  const name = file.name.toLowerCase();
+  const isAllowed = ALLOWED_EXTENSIONS.some((ext) => name.endsWith(ext));
+  if (!isAllowed) {
+    return "Only PDF and PowerPoint (.pptx) files are supported.";
   }
   if (file.size === 0) {
     return "This file is empty.";

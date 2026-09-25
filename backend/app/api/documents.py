@@ -1,20 +1,14 @@
 """
-Document upload, analysis, detection, processing, and download endpoints.
+Document upload, analysis, detection, processing, preview, and download endpoints.
 
-Phase 1: upload + validation + safe temporary storage.
-Phase 2: analysis (text extraction, image detection, scanned-page
-detection) on top of Phase 1's upload flow.
-Phase 3: text watermark candidate detection and removal via redaction,
-plus the download endpoint needed to retrieve the result.
-Phase 4: image watermark candidate detection and removal, combined
-with text removal in a single PyMuPDF pass (see watermark_remover.py).
-Phase 5: manual region selection (removes text/image/graphics
-together within a user-drawn box) and the page-preview endpoint that
-makes selection possible without a full preview UI (Phase 7).
-Phase 6: scanned-page handling — manual selection now inpaints
-(instead of redacts) on scanned pages, and a new /ocr endpoint adds a
-searchable text layer to scanned pages on request.
+Supports both PDF and PowerPoint (PPTX) documents:
+- PDF: Object-level PyMuPDF text & image redaction, OpenCV scanned inpainting, OCR.
+- PPTX: OpenXML shape, text, layout, and slide-master watermark inspection and removal.
+- Watermark Detection: Tokenless heuristic AI pattern recognition covering CamScanner,
+  Gamma App, Canva, Adobe Scan, WPS, Tome, PDF utilities, and confidential/draft stamps.
 """
+from __future__ import annotations
+
 import logging
 import re
 from pathlib import Path
@@ -35,33 +29,52 @@ from app.services.image_remover import ImageRemovalError
 from app.services.manual_remover import ManualRemovalError, remove_manual_regions
 from app.services.ocr_service import OcrError, add_ocr_text_layer
 from app.services.pdf_analyzer import AnalysisError, analyze_document
+from app.services.pptx_processor import (
+    PptxProcessingError,
+    analyze_pptx,
+    get_pptx_slide_count,
+    is_pptx_file,
+    remove_pptx_watermarks,
+    render_pptx_slide_preview,
+)
 from app.services.scanned_detector import scanned_page_xrefs
 from app.services.text_remover import RemovalError
 from app.services.watermark_detector import generate_candidates
 from app.services.watermark_remover import remove_candidates
 from app.utils.document_store import DocumentRecord, analysis_store, detection_store, document_store, preview_cache, utcnow
-from app.utils.file_validation import FileValidationError, generate_document_id, safe_pdf_path, validate_upload
+from app.utils.file_validation import (
+    FileValidationError,
+    generate_document_id,
+    get_file_extension,
+    safe_document_path,
+    validate_upload,
+)
 
 logger = logging.getLogger("document_cleaner")
 
 router = APIRouter(prefix="/api/v1/documents", tags=["documents"])
 
-# Only the first few bytes are needed to check the PDF magic number.
 MAGIC_BYTES_READ_LENGTH = 8
+PREVIEW_DPI = 120
 
 
 def _api_error(status_code: int, code: str, message: str) -> HTTPException:
     return HTTPException(status_code=status_code, detail={"success": False, "error": {"code": code, "message": message}})
 
 
+def _is_pptx(record: "DocumentRecord") -> bool:
+    """Determine if a document is a PowerPoint presentation."""
+    if record.original_filename and record.original_filename.lower().endswith((".pptx", ".ppt")):
+        return True
+    if record.stored_path and record.stored_path.lower().endswith(".pptx"):
+        return True
+    return False
+
+
 def _current_source_path(record: "DocumentRecord") -> Path:
     """
     The most up-to-date version of a document: its processed result if
-    any automatic or manual removal has already run, otherwise the
-    original upload. Every removal step (automatic /process, manual
-    /manual-remove, /ocr) and /preview all read from this, so they
-    compose correctly instead of one silently overwriting the other's
-    work.
+    any removal has already run, otherwise the original upload.
     """
     if record.result_path and Path(record.result_path).exists():
         return Path(record.result_path)
@@ -69,16 +82,16 @@ def _current_source_path(record: "DocumentRecord") -> Path:
 
 
 def _get_or_run_analysis(document_id: str, record: "DocumentRecord") -> DocumentAnalysisResponse:
-    """
-    Analysis is cached from /analyze or /detect, but several Phase 6
-    endpoints need it too (to know which pages are scanned) and
-    shouldn't force the caller to sequence an extra request first.
-    """
+    """Retrieve cached analysis or run fresh structural analysis."""
     analysis = analysis_store.get(document_id)
     if analysis is None:
+        source_path = _current_source_path(record)
         try:
-            analysis = analyze_document(document_id, _current_source_path(record))
-        except AnalysisError as exc:
+            if _is_pptx(record):
+                analysis = analyze_pptx(document_id, source_path)
+            else:
+                analysis = analyze_document(document_id, source_path)
+        except (AnalysisError, PptxProcessingError) as exc:
             raise _api_error(400, exc.code, exc.message) from exc
         analysis_store.set(document_id, analysis)
     return analysis  # type: ignore[return-value]
@@ -90,18 +103,19 @@ async def upload_document(file: UploadFile = File(...)) -> DocumentUploadRespons
     header = contents[:MAGIC_BYTES_READ_LENGTH]
 
     try:
-        validate_upload(
+        ext = validate_upload(
             filename=file.filename,
             content_type=file.content_type,
             size_bytes=len(contents),
             header=header,
             max_size_bytes=settings.max_upload_size_bytes,
+            full_contents=contents,
         )
     except FileValidationError as exc:
         raise _api_error(400, exc.code, exc.message) from exc
 
     document_id = generate_document_id()
-    stored_path = safe_pdf_path(settings.upload_path, document_id)
+    stored_path = safe_document_path(settings.upload_path, document_id, ext)
 
     try:
         stored_path.write_bytes(contents)
@@ -109,27 +123,36 @@ async def upload_document(file: UploadFile = File(...)) -> DocumentUploadRespons
         logger.error("upload_write_failed job_id=%s", document_id)
         raise _api_error(500, "STORAGE_ERROR", "The file could not be saved. Please try again.") from exc
 
-    page_count = None
-    try:
-        with fitz.open(stored_path) as pdf:
-            if pdf.needs_pass:
-                stored_path.unlink(missing_ok=True)
-                raise _api_error(
-                    400,
-                    "PASSWORD_PROTECTED",
-                    "This PDF is password-protected. Please unlock it before uploading.",
-                )
-            page_count = pdf.page_count
-    except HTTPException:
-        raise
-    except Exception as exc:  # noqa: BLE001 - any PyMuPDF failure means an unreadable/corrupt PDF
-        stored_path.unlink(missing_ok=True)
-        logger.warning("upload_unreadable_pdf job_id=%s", document_id)
-        raise _api_error(400, "INVALID_PDF", "The uploaded file is not a valid or readable PDF.") from exc
+    page_count: int | None = None
+
+    if ext == ".pptx":
+        try:
+            page_count = get_pptx_slide_count(stored_path)
+        except Exception as exc:
+            stored_path.unlink(missing_ok=True)
+            logger.warning("upload_unreadable_pptx job_id=%s: %s", document_id, exc)
+            raise _api_error(400, "INVALID_PPTX", "The uploaded file is not a readable PowerPoint presentation.") from exc
+    else:
+        try:
+            with fitz.open(stored_path) as pdf:
+                if pdf.needs_pass:
+                    stored_path.unlink(missing_ok=True)
+                    raise _api_error(
+                        400,
+                        "PASSWORD_PROTECTED",
+                        "This PDF is password-protected. Please unlock it before uploading.",
+                    )
+                page_count = pdf.page_count
+        except HTTPException:
+            raise
+        except Exception as exc:
+            stored_path.unlink(missing_ok=True)
+            logger.warning("upload_unreadable_pdf job_id=%s", document_id)
+            raise _api_error(400, "INVALID_PDF", "The uploaded file is not a valid or readable PDF.") from exc
 
     record = DocumentRecord(
         document_id=document_id,
-        original_filename=file.filename,
+        original_filename=file.filename or f"document{ext}",
         size_bytes=len(contents),
         page_count=page_count,
         uploaded_at=utcnow(),
@@ -137,11 +160,11 @@ async def upload_document(file: UploadFile = File(...)) -> DocumentUploadRespons
     )
     document_store.add(record)
 
-    logger.info("upload_success job_id=%s size_bytes=%s pages=%s", document_id, record.size_bytes, page_count)
+    logger.info("upload_success job_id=%s size_bytes=%s pages=%s type=%s", document_id, record.size_bytes, page_count, ext)
 
     return DocumentUploadResponse(
         document_id=document_id,
-        original_filename=file.filename,
+        original_filename=record.original_filename,
         size_bytes=record.size_bytes,
         page_count=page_count,
         uploaded_at=record.uploaded_at,
@@ -158,8 +181,12 @@ async def analyze_document_route(document_id: str) -> DocumentAnalysisResponse:
     document_store.set_status(document_id, "analyzing")
 
     try:
-        result = analyze_document(document_id, Path(record.stored_path))
-    except AnalysisError as exc:
+        source_path = Path(record.stored_path)
+        if _is_pptx(record):
+            result = analyze_pptx(document_id, source_path)
+        else:
+            result = analyze_document(document_id, source_path)
+    except (AnalysisError, PptxProcessingError) as exc:
         document_store.set_status(document_id, "uploaded")
         raise _api_error(400, exc.code, exc.message) from exc
 
@@ -199,17 +226,7 @@ async def detect_watermarks(document_id: str) -> DetectionResponse:
     if record is None:
         raise _api_error(404, "DOCUMENT_NOT_FOUND", "No document was found with that ID.")
 
-    analysis = analysis_store.get(document_id)
-    if analysis is None:
-        # /detect depends on analysis but is convenient to call on its
-        # own — run it automatically rather than making the caller
-        # sequence two requests for one logical step.
-        try:
-            analysis = analyze_document(document_id, Path(record.stored_path))
-        except AnalysisError as exc:
-            raise _api_error(400, exc.code, exc.message) from exc
-        analysis_store.set(document_id, analysis)
-
+    analysis = _get_or_run_analysis(document_id, record)
     candidates = generate_candidates(analysis)
     detection_store.set(document_id, candidates)
     document_store.set_status(document_id, "detected")
@@ -253,12 +270,19 @@ async def process_document(document_id: str, request: ProcessRequest) -> Process
     else:
         pages_filter = None  # "all"
 
+    source_path = _current_source_path(record)
+    is_ppt = _is_pptx(record)
+
     try:
-        cleaned_bytes, pages_affected, skipped_ids = remove_candidates(_current_source_path(record), selected, pages_filter)
-    except (RemovalError, ImageRemovalError) as exc:
+        if is_ppt:
+            cleaned_bytes, pages_affected, skipped_ids = remove_pptx_watermarks(source_path, selected, pages_filter)
+            result_path = settings.result_path / f"{document_id}.pptx"
+        else:
+            cleaned_bytes, pages_affected, skipped_ids = remove_candidates(source_path, selected, pages_filter)
+            result_path = settings.result_path / f"{document_id}.pdf"
+    except (RemovalError, ImageRemovalError, PptxProcessingError) as exc:
         raise _api_error(400, exc.code, exc.message) from exc
 
-    result_path = settings.result_path / f"{document_id}.pdf"
     try:
         result_path.write_bytes(cleaned_bytes)
     except OSError as exc:
@@ -267,9 +291,6 @@ async def process_document(document_id: str, request: ProcessRequest) -> Process
 
     document_store.set_result_path(document_id, str(result_path))
     document_store.set_status(document_id, "processed")
-    # The document changed and any prior save renumbers PDF xrefs
-    # document-wide; cached analysis (image xrefs especially) is no
-    # longer trustworthy against the new bytes.
     analysis_store.delete(document_id)
 
     all_skipped = sorted(set(skipped_ids) | set(unknown_ids))
@@ -292,11 +313,11 @@ async def process_document(document_id: str, request: ProcessRequest) -> Process
     )
 
 
-def _safe_download_filename(original_filename: str) -> str:
+def _safe_download_filename(original_filename: str, ext: str = ".pdf") -> str:
     """Build a Content-Disposition-safe filename derived from the original name."""
     stem = Path(original_filename).stem
     safe_stem = re.sub(r"[^A-Za-z0-9_-]+", "_", stem).strip("_") or "document"
-    return f"cleaned_{safe_stem}.pdf"
+    return f"cleaned_{safe_stem}{ext}"
 
 
 @router.get("/{document_id}/download")
@@ -308,20 +329,19 @@ async def download_document(document_id: str) -> FileResponse:
     if not record.result_path or not Path(record.result_path).exists():
         raise _api_error(400, "NOT_PROCESSED", "This document has not been processed yet.")
 
+    is_ppt = _is_pptx(record)
+    media_type = (
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+        if is_ppt
+        else "application/pdf"
+    )
+    download_ext = ".pptx" if is_ppt else ".pdf"
+
     return FileResponse(
         path=record.result_path,
-        media_type="application/pdf",
-        filename=_safe_download_filename(record.original_filename),
+        media_type=media_type,
+        filename=_safe_download_filename(record.original_filename, download_ext),
     )
-
-
-# 150 DPI keeps preview images legible for manual selection without
-# being large enough to slow down the page-image round trip.
-# 120 DPI keeps preview images legible for manual selection while
-# rendering and transferring noticeably faster than the previous 150 —
-# page navigation was reported as slow, and render + PNG-encode time
-# scales with the square of the DPI.
-PREVIEW_DPI = 120
 
 
 @router.get("/{document_id}/preview/{page_number}")
@@ -333,11 +353,6 @@ async def preview_page(document_id: str, page_number: int, version: str = "curre
     if version not in ("current", "original"):
         raise _api_error(400, "INVALID_VERSION", "version must be 'current' or 'original'.")
 
-    # "original" always renders the untouched upload, regardless of
-    # what processing has happened since — this is what makes a real
-    # before/after comparison possible. "current" (the default) is
-    # whatever state the document is actually in right now, same as
-    # before this parameter existed.
     source_path = Path(record.stored_path) if version == "original" else _current_source_path(record)
 
     try:
@@ -349,25 +364,28 @@ async def preview_page(document_id: str, page_number: int, version: str = "curre
     if cached is not None:
         return Response(content=cached, media_type="image/jpeg")
 
-    try:
-        with fitz.open(source_path) as pdf:
-            if page_number < 1 or page_number > pdf.page_count:
-                raise _api_error(400, "INVALID_PAGE", f"This document has {pdf.page_count} pages.")
-            page = pdf[page_number - 1]
-            zoom = PREVIEW_DPI / 72
-            pixmap = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom))
-            # JPEG rather than PNG: this is a UI preview for manual
-            # selection, not the downloaded document (which stays
-            # lossless), and photographic scanned content compresses
-            # ~80% smaller as JPEG — a real fix for page-navigation
-            # feeling slow, since transfer size dominates render time
-            # on anything but localhost.
-            image_bytes = pixmap.tobytes("jpg", jpg_quality=85)
-    except HTTPException:
-        raise
-    except Exception as exc:  # noqa: BLE001 - any PyMuPDF failure means the file couldn't be rendered
-        logger.error("preview_failed job_id=%s page=%s version=%s", document_id, page_number, version)
-        raise _api_error(500, "PREVIEW_FAILED", "This page could not be rendered.") from exc
+    is_ppt = _is_pptx(record)
+
+    if is_ppt:
+        try:
+            image_bytes = render_pptx_slide_preview(source_path, page_number)
+        except Exception as exc:
+            logger.error("preview_failed_pptx job_id=%s slide=%s: %s", document_id, page_number, exc)
+            raise _api_error(500, "PREVIEW_FAILED", "This PowerPoint slide could not be rendered.") from exc
+    else:
+        try:
+            with fitz.open(source_path) as pdf:
+                if page_number < 1 or page_number > pdf.page_count:
+                    raise _api_error(400, "INVALID_PAGE", f"This document has {pdf.page_count} pages.")
+                page = pdf[page_number - 1]
+                zoom = PREVIEW_DPI / 72
+                pixmap = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom))
+                image_bytes = pixmap.tobytes("jpg", jpg_quality=85)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            logger.error("preview_failed job_id=%s page=%s version=%s", document_id, page_number, version)
+            raise _api_error(500, "PREVIEW_FAILED", "This page could not be rendered.") from exc
 
     preview_cache.set(document_id, page_number, mtime, image_bytes)
     return Response(content=image_bytes, media_type="image/jpeg")
@@ -385,13 +403,6 @@ async def manual_remove(document_id: str, request: ManualRemovalRequest) -> Manu
 
     source_path = _current_source_path(record)
 
-    # Scanned-page xrefs must come from a FRESH analysis of the exact
-    # bytes we're about to inpaint, not the cached analysis_store
-    # value. Any prior /process or /manual-remove call resaves the
-    # whole document with garbage collection, which renumbers PDF
-    # xrefs document-wide — including for pages that call didn't even
-    # touch. A stale cached xref would silently target the wrong
-    # image (or none at all).
     try:
         fresh_analysis = analyze_document(document_id, source_path)
     except AnalysisError as exc:
@@ -414,17 +425,13 @@ async def manual_remove(document_id: str, request: ManualRemovalRequest) -> Manu
 
     document_store.set_result_path(document_id, str(result_path))
     document_store.set_status(document_id, "processed")
-    # The just-used analysis reflects pre-edit content; invalidate the
-    # cache so a subsequent /detect or /manual-remove call re-derives
-    # fresh state instead of reasoning about content that's now gone.
     analysis_store.delete(document_id)
 
     logger.info(
-        "manual_remove_success job_id=%s regions=%s pages_affected=%s scanned_pages_used=%s",
+        "manual_remove_success job_id=%s regions=%s pages_affected=%s",
         document_id,
         len(request.regions),
         pages_affected,
-        sorted(set(pages_affected) & scanned_pages.keys()),
     )
 
     return ManualRemovalResponse(
@@ -440,15 +447,6 @@ async def ocr_document(document_id: str, request: OcrRequest) -> OcrResponse:
     if record is None:
         raise _api_error(404, "DOCUMENT_NOT_FOUND", "No document was found with that ID.")
 
-    # If OCR already ran on this document and the caller isn't
-    # explicitly targeting specific pages, don't re-run Tesseract at
-    # all. Relying only on "is this page still scanned" to detect
-    # "already OCR'd" isn't reliable — a page where recognition finds
-    # very few words can still measure under the scanned-text
-    # threshold even after OCR runs, which would otherwise silently
-    # re-process the same pages (wasted time, and on a slow connection
-    # a real risk of the request timing out, which surfaces to the
-    # user as a bare connection error instead of a clear message).
     if record.ocr_applied and not request.pages:
         return OcrResponse(document_id=document_id, pages_ocred=[], already_applied=True)
 
@@ -457,20 +455,10 @@ async def ocr_document(document_id: str, request: OcrRequest) -> OcrResponse:
     if request.pages:
         target_pages = request.pages
     else:
-        # "The system should determine whether OCR is required" — default
-        # to every page the analyzer flagged as scanned. Page *numbers*
-        # (unlike image xrefs) stay valid across a resave, so the cached
-        # analysis is fine to reuse here.
         analysis = _get_or_run_analysis(document_id, record)
         target_pages = [p.page_number for p in analysis.pages if p.is_scanned]
 
     if not target_pages:
-        # Not an error: the document either never needed OCR, or
-        # already has a text layer (e.g. OCR ran once already, which
-        # itself makes a page no longer look "scanned"). Per the spec,
-        # OCR must not unnecessarily modify a document that already
-        # has usable text — the correct response is "nothing to do",
-        # not a failure. Leave the document and caches untouched.
         return OcrResponse(document_id=document_id, pages_ocred=[], already_applied=record.ocr_applied)
 
     try:
@@ -488,7 +476,7 @@ async def ocr_document(document_id: str, request: OcrRequest) -> OcrResponse:
     document_store.set_result_path(document_id, str(result_path))
     document_store.set_status(document_id, "processed")
     document_store.set_ocr_applied(document_id, True)
-    analysis_store.delete(document_id)  # page text content changed; cached analysis is now stale
+    analysis_store.delete(document_id)
 
     logger.info("ocr_success job_id=%s pages=%s", document_id, list(words_by_page.keys()))
 
@@ -500,11 +488,6 @@ async def ocr_document(document_id: str, request: OcrRequest) -> OcrResponse:
 
 @router.delete("/{document_id}")
 async def delete_document_route(document_id: str) -> dict:
-    """
-    Explicit, immediate deletion — for a user who wants their document
-    gone right away rather than waiting for the periodic retention
-    sweep (see cleanup_service.py / main.py's background task).
-    """
     record = document_store.get(document_id)
     if record is None:
         raise _api_error(404, "DOCUMENT_NOT_FOUND", "No document was found with that ID.")
