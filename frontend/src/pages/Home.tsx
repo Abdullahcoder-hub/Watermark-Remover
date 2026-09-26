@@ -24,7 +24,7 @@ import { HowToUse } from "../components/HowToUse";
 import { ManualSelectionCanvas } from "../components/ManualSelectionCanvas";
 import { Navbar } from "../components/Navbar";
 import { ProgressBar } from "../components/ProgressBar";
-import { QuickTools } from "../components/QuickTools";
+// import { QuickTools } from "../components/QuickTools";
 import { UploadArea } from "../components/UploadArea";
 import { useDocumentAnalysis } from "../hooks/useDocumentAnalysis";
 import { useDocumentUpload } from "../hooks/useDocumentUpload";
@@ -64,7 +64,9 @@ export function Home() {
 
   useEffect(() => {
     if (detectionStatus === "success" && detection) {
-      setSelectedIds(new Set(detection.candidates.map((c) => c.candidate_id)));
+      // Pre-select ONLY high-confidence true watermark candidates (confidence >= 0.70)
+      const highConfidenceCandidates = detection.candidates.filter((c) => c.confidence >= 0.70);
+      setSelectedIds(new Set(highConfidenceCandidates.map((c) => c.candidate_id)));
     }
   }, [detectionStatus, detection]);
 
@@ -122,8 +124,6 @@ export function Home() {
         <nav aria-label="Breadcrumb" className="mb-6 flex items-center justify-center gap-2 text-xs font-medium text-slate-400">
           <a href="/" className="hover:text-brand-600 transition-colors">Home</a>
           <span>/</span>
-          <a href="#tools" className="hover:text-brand-600 transition-colors">PDF Tools</a>
-          <span>/</span>
           <span className="text-slate-700 font-semibold">Watermark Remover</span>
         </nav>
 
@@ -145,7 +145,7 @@ export function Home() {
             Remove text, image, and background watermarks across PDF & PowerPoint pages. Fast, accurate, and secure file processing directly in your browser.
           </p>
 
-          {/* Feature Badges matching Screenshot 2 */}
+          {/* Feature Badges */}
           <div className="flex flex-wrap items-center justify-center gap-4 pt-2 text-xs font-semibold text-slate-600">
             <span className="inline-flex items-center gap-1.5 text-emerald-600 bg-emerald-50 px-2.5 py-1 rounded-full border border-emerald-100">
               <ShieldCheck className="h-3.5 w-3.5" />
@@ -408,11 +408,13 @@ export function Home() {
         {/* How To Use Dark Navy Section (Screenshot 1) */}
         <HowToUse />
 
-        {/* Quick Tools Grid (Screenshot 3) */}
-        <QuickTools />
+        {/* ========================================================================= */}
+        {/* FUTURE QUICK TOOLS: Uncomment when additional converters are added         */}
+        {/* <QuickTools />                                                            */}
+        {/* ========================================================================= */}
       </div>
 
-      {/* Footer (Screenshot 3) */}
+      {/* Footer */}
       <Footer />
     </div>
   );

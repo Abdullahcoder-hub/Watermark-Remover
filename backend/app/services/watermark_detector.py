@@ -1,18 +1,9 @@
 """
 Watermark candidate detector (Text, Images, and Multi-format Signatures).
 
-Trained heuristic AI pattern detector for identifying watermarks across all document
-types (PDF, PPTX, scanned documents) without calling external cloud LLMs or using API tokens.
-
-Detection Coverage:
-  - Mobile Scanners: CamScanner, Adobe Scan, vFlat, ClearScanner, TurboScan, Genius Scan, Doc Scanner, TapScanner, Kaagaz.
-  - AI & Slide Tools: Gamma ("Made with Gamma", "gamma.app"), Tome ("Made with Tome"), Beautiful.ai, Pitch, Prezi, Slidesgo, SlidesAI.
-  - Graphic Design Tools: Canva ("Designed with Canva", "Made with Canva"), Figma.
-  - PDF Utilities: iLovePDF, SmallPDF, PDF24, Sejda, Nitro, Foxit, Soda PDF, PDFcandy, Wondershare PDFelement, UPDF, WPS Office.
-  - Document Stamps: CONFIDENTIAL, DRAFT, SAMPLE, COPY, DO NOT COPY, TOP SECRET, INTERNAL USE ONLY, FOR REVIEW ONLY,
-    DO NOT DISTRIBUTE, RESTRICTED, PRELIMINARY, PROPRIETARY, PROOF, VOID, DEMO, TRIAL VERSION, EVALUATION ONLY, WATERMARK, UNREGISTERED.
-  - E-Signatures: DocuSign ("DocuSign Envelope ID"), PandaDoc, Adobe Sign, SignNow, HelloSign.
-  - Academic / Notes: Mathpix, Overleaf, Quizlet, Scribd, SlideShare, Course Hero.
+Trained heuristic AI pattern detector for identifying true watermarks across all document
+types (PDF, PPTX, scanned documents) without false-positive triggers on normal document text,
+names, or running headers.
 """
 from __future__ import annotations
 
@@ -24,83 +15,13 @@ from app.schemas.analysis import DocumentAnalysisResponse, ImageObject, TextObje
 from app.schemas.watermark import WatermarkCandidate
 from app.services.pdf_analyzer import SCANNED_IMAGE_COVERAGE_THRESHOLD
 
-# Explicit high-confidence watermark signatures (triggers >= 0.85 base confidence)
-EXPLICIT_WATERMARK_SIGNATURES: set[str] = {
-    # CamScanner & Mobile Scanners
-    "camscanner",
-    "scanned with camscanner",
-    "scanned by camscanner",
-    "cs camscanner",
-    "camscanner.com",
-    "cam scanner",
-    "adobe scan",
-    "scanned with adobe scan",
-    "vflat",
-    "scanned with vflat",
-    "vflat scan",
-    "clearscanner",
-    "turboscan",
-    "genius scan",
-    "tapscanner",
-    "kaagaz scanner",
-    "simple scan",
-    "doc scanner",
-    "fast scanner",
-
-    # Gamma App & AI Presentation Tools
-    "made with gamma",
-    "gamma.app",
-    "created with gamma",
-    "powered by gamma",
-    "gamma app",
-    "made on gamma",
-    "made with tome",
-    "tome.app",
-    "beautiful.ai",
-    "created with beautiful.ai",
-    "pitch.com",
-    "prezi",
-    "slidesgo",
-    "slidesai",
-    "plus ai",
-    "decktopus",
-    "popai",
-    "wepik",
-
-    # Canva & Graphic Design
-    "designed with canva",
-    "made with canva",
-    "canva watermark",
-    "canva.com",
-    "canva pro",
-
-    # Online Converters & PDF Editors
-    "ilovepdf",
-    "smallpdf",
-    "pdf24",
-    "sejda",
-    "nitro pdf",
-    "foxit",
-    "foxit pdf",
-    "soda pdf",
-    "pdfcandy",
-    "easeus pdf",
-    "wondershare pdfelement",
-    "pdfelement",
-    "updf",
-    "pdfgear",
-    "lightpdf",
-    "wps office",
-    "created with wps office",
-    "kingsoft office",
-
-    # Document Status & Security Stamps
+# Explicit standalone watermark keywords (must match whole word with \b)
+EXPLICIT_WATERMARK_WORDS = {
     "confidential",
     "strictly confidential",
     "private & confidential",
     "draft",
     "sample",
-    "copy",
     "do not copy",
     "top secret",
     "internal use only",
@@ -112,7 +33,6 @@ EXPLICIT_WATERMARK_SIGNATURES: set[str] = {
     "proprietary",
     "proof",
     "void",
-    "demo",
     "trial version",
     "evaluation only",
     "evaluation copy",
@@ -126,45 +46,51 @@ EXPLICIT_WATERMARK_SIGNATURES: set[str] = {
     "provisional",
     "embargoed",
     "unauthorized reproduction",
-
-    # E-Signatures & Verification
-    "docusign",
-    "docusign envelope id",
-    "signed with pandadoc",
-    "pandadoc",
-    "adobe sign",
-    "signnow",
-    "hellosign",
-
-    # Academic & Repositories
-    "mathpix",
-    "mathpix snip",
-    "overleaf",
-    "quizlet",
-    "scribd",
-    "slideshare",
-    "course hero",
 }
 
-# Regex patterns for dynamic or phrased watermark text
-WATERMARK_REGEX_PATTERNS: list[re.Pattern] = [
-    re.compile(r"\b(?:scanned\s+(?:with|by))\s+[a-z0-9_\-\s]+", re.IGNORECASE),
-    re.compile(r"\b(?:made|created|designed|powered)\s+(?:with|by|on)\s+(?:gamma|tome|canva|beautiful\.ai|slidesgo|pitch)", re.IGNORECASE),
+# Regex patterns with word boundaries for tool-specific watermark phrases
+EXPLICIT_WATERMARK_REGEXES: list[re.Pattern] = [
+    # CamScanner & Mobile Scanners
+    re.compile(r"\b(?:scanned\s+(?:with|by)\s+)?camscanner(?:\.com)?\b", re.IGNORECASE),
+    re.compile(r"\bcs\s+camscanner\b", re.IGNORECASE),
+    re.compile(r"\bscanned\s+(?:with|by)\s+(?:adobe\s+scan|vflat|clearscanner|turboscan|genius\s+scan|tapscanner|kaagaz|doc\s+scanner|fast\s+scanner|simple\s+scan)\b", re.IGNORECASE),
+    re.compile(r"\b(?:adobe\s+scan|vflat\s+scan|clearscanner|turboscan|genius\s+scan|tapscanner)\b", re.IGNORECASE),
+
+    # Gamma App & AI Tools
+    re.compile(r"\b(?:made|created|powered|generated)\s+(?:with|by|on)\s+gamma(?:\.app)?\b", re.IGNORECASE),
+    re.compile(r"\bgamma\.app\b", re.IGNORECASE),
+    re.compile(r"\b(?:made|created)\s+(?:with|by)\s+(?:tome|beautiful\.ai|pitch|slidesgo|slidesai|plus\s+ai|decktopus|wepik)\b", re.IGNORECASE),
+    re.compile(r"\btome\.app\b", re.IGNORECASE),
+
+    # Canva & Design Tools
+    re.compile(r"\b(?:designed|made)\s+with\s+canva(?:\.com)?\b", re.IGNORECASE),
+    re.compile(r"\bcanva\s+watermark\b", re.IGNORECASE),
+    re.compile(r"\bcanva\.com\b", re.IGNORECASE),
+
+    # Online PDF Tools & Editors
+    re.compile(r"\b(?:ilovepdf|smallpdf|pdf24|sejda|pdfcandy|lightpdf|pdfgear|updf)\.com\b", re.IGNORECASE),
+    re.compile(r"\b(?:ilovepdf|smallpdf|pdf24|sejda|pdfcandy|lightpdf|pdfgear|updf)\b", re.IGNORECASE),
+    re.compile(r"\b(?:created|converted)\s+with\s+wps\s+office\b", re.IGNORECASE),
+    re.compile(r"\bwondershare\s+pdfelement\b", re.IGNORECASE),
+    re.compile(r"\bnitro\s+pdf\b", re.IGNORECASE),
+    re.compile(r"\bfoxit\s+pdf\b", re.IGNORECASE),
+
+    # Version & Status Patterns
     re.compile(r"\b(?:trial|evaluation|unregistered|demo)\s+version\b", re.IGNORECASE),
     re.compile(r"\bdocu?sign\s+envelope\s+id:?\s*[0-9a-f\-]+", re.IGNORECASE),
-    re.compile(r"\b(?:gamma\.app|camscanner\.com|canva\.com|ilovepdf\.com|smallpdf\.com|pdf24\.org|sejda\.com)\b", re.IGNORECASE),
+    re.compile(r"\bsigned\s+with\s+pandadoc\b", re.IGNORECASE),
+    re.compile(r"\bmathpix\s+snip\b", re.IGNORECASE),
 ]
 
-TEXT_REPETITION_WEIGHT = 0.40
-ROTATION_WEIGHT = 0.30
-EXPLICIT_KEYWORD_WEIGHT = 0.85
-GENERAL_KEYWORD_WEIGHT = 0.20
-SIZE_WEIGHT = 0.10
-MARGIN_WEIGHT = 0.10
+# Scoring Constants
+EXPLICIT_SIGNATURE_SCORE = 0.95
+ROTATION_WEIGHT = 0.35
+LARGE_SIZE_WEIGHT = 0.15
+REPETITION_BOOST = 0.15
 
-ROTATION_TOLERANCE_DEGREES = 1.0
+ROTATION_TOLERANCE_DEGREES = 2.0
 LARGE_TEXT_HEIGHT_RATIO = 0.05  # span height vs. page height
-MIN_PAGES_FOR_REPETITION = 2
+MIN_PAGES_FOR_REPETITION = 3
 
 IMAGE_REPETITION_WEIGHT = 0.40
 TRANSPARENCY_WEIGHT = 0.30
@@ -182,20 +108,24 @@ def _is_rotated(rotation_degrees: float) -> bool:
     return min(normalized, 360 - normalized) > ROTATION_TOLERANCE_DEGREES
 
 
-def _matches_explicit_signature(normalized_text: str) -> bool:
-    """Check if normalized text contains an explicit tool or status watermark."""
-    if any(sig in normalized_text for sig in EXPLICIT_WATERMARK_SIGNATURES):
-        return True
-    return any(p.search(normalized_text) is not None for p in WATERMARK_REGEX_PATTERNS)
+def _matches_explicit_signature(text: str) -> bool:
+    """
+    Check if text contains a recognized watermark phrase using strict word boundaries.
+    Never matches partial substrings inside normal words (e.g. 'demo' inside 'democracy').
+    """
+    normalized = text.strip().lower()
 
+    # Exact whole-phrase or word-boundary check
+    for word in EXPLICIT_WATERMARK_WORDS:
+        pattern = r"\b" + re.escape(word) + r"\b"
+        if re.search(pattern, normalized):
+            return True
 
-def _is_in_margin_zone(bbox: tuple[float, float, float, float], page_height: float) -> bool:
-    """Check if text is placed in footer (>90% of height) or header (<8% of height) margin."""
-    if page_height <= 0:
-        return False
-    top_fraction = bbox[1] / page_height
-    bottom_fraction = bbox[3] / page_height
-    return top_fraction < 0.08 or bottom_fraction > 0.90
+    for regex in EXPLICIT_WATERMARK_REGEXES:
+        if regex.search(normalized):
+            return True
+
+    return False
 
 
 def _generate_text_candidates(analysis: DocumentAnalysisResponse) -> list[WatermarkCandidate]:
@@ -217,39 +147,38 @@ def _generate_text_candidates(analysis: DocumentAnalysisResponse) -> list[Waterm
 
         for obj in occurrences:
             is_rotated = _is_rotated(obj.rotation_degrees)
+            page_height = page_heights.get(obj.page, 0.0)
+            span_height = obj.bbox[3] - obj.bbox[1]
+            is_large = page_height > 0 and (span_height / page_height) > LARGE_TEXT_HEIGHT_RATIO
 
-            # Primary watermark signal check: must match keyword, be repeated, or be rotated
-            if not (is_explicit_match or is_repeated or is_rotated):
+            # Strict Filter: Must be an explicit signature OR a rotated watermark overlay
+            # Normal repeated text (like author names, running headers, titles) is NOT a watermark
+            if not is_explicit_match and not is_rotated:
                 continue
 
             score = 0.0
             reasons: list[str] = []
 
-            if is_repeated:
-                score += TEXT_REPETITION_WEIGHT
-                reasons.append(f"same text appears on {len(pages_with_text)} pages")
+            if is_explicit_match:
+                score += EXPLICIT_SIGNATURE_SCORE
+                reasons.append("matches common watermark wording")
 
             if is_rotated:
                 score += ROTATION_WEIGHT
                 reasons.append(f"rotated {obj.rotation_degrees}°")
 
-            if is_explicit_match:
-                score += EXPLICIT_KEYWORD_WEIGHT
-                reasons.append("matches common watermark wording")
+            if is_repeated:
+                score += REPETITION_BOOST
+                reasons.append(f"same text appears on {len(pages_with_text)} pages")
 
-            page_height = page_heights.get(obj.page, 0.0)
-            span_height = obj.bbox[3] - obj.bbox[1]
-            if page_height > 0 and (span_height / page_height) > LARGE_TEXT_HEIGHT_RATIO:
-                score += SIZE_WEIGHT
+            if is_large:
+                score += LARGE_SIZE_WEIGHT
                 reasons.append("large relative to the page")
-
-            if _is_in_margin_zone(obj.bbox, page_height) and is_explicit_match:
-                score += MARGIN_WEIGHT
 
             if score <= 0:
                 continue
 
-            confidence_val = round(min(score, 1.0), 2)
+            confidence_val = round(min(score, 0.99), 2)
 
             candidates.append(
                 WatermarkCandidate(
@@ -302,7 +231,7 @@ def _generate_image_candidates(analysis: DocumentAnalysisResponse) -> list[Water
 
     for xref, occurrences in occurrences_by_xref.items():
         pages_with_image = {o.page for o in occurrences}
-        is_repeated = len(pages_with_image) >= MIN_PAGES_FOR_REPETITION
+        is_repeated = len(pages_with_image) >= 2
 
         for img in occurrences:
             score = 0.0
@@ -339,7 +268,7 @@ def _generate_image_candidates(analysis: DocumentAnalysisResponse) -> list[Water
                     page=img.page,
                     bbox=img.bbox,
                     rotation_degrees=0.0,
-                    confidence=round(min(score, 1.0), 2),
+                    confidence=round(min(score, 0.99), 2),
                     reasons=reasons,
                     xref=xref,
                 )

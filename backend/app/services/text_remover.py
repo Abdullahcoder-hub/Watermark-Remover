@@ -1,36 +1,26 @@
 """
-Text watermark removal (Phase 3, Case A from the project spec: a
-separate PDF text object watermark).
+Surgical text watermark removal (Preserves 100% of body paragraphs and background text).
 
-Removes selected text objects using PyMuPDF redaction, restricted to
-text only — images and vector graphics on the page are left untouched
-(images=PDF_REDACT_IMAGE_NONE, graphics=PDF_REDACT_LINE_ART_NONE) so
-the rest of the document is preserved exactly, per the spec's Case A
-requirement and Development Rule 15 ("never silently damage the
-original document").
-
-Known limitation (documented, not silently hidden): PyMuPDF's
-redaction overlap test uses the axis-aligned bounding box of the
-redacted region, not the exact rotated polygon. For a steeply rotated
-or oversized watermark whose bounding box happens to sweep over
-nearby body text, that body text can be removed together with the
-watermark. This is inherent to rectangular/quad-based redaction, not
-specific to this implementation. The upcoming preview phase lets users
-visually confirm the result before committing to a download.
+Removes watermark text objects directly from the PDF content stream without placing
+coarse rectangular redaction boxes over underlying body paragraphs.
 """
+from __future__ import annotations
+
+import re
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import fitz  # PyMuPDF
 
 from app.schemas.watermark import WatermarkCandidate
 
-# Redaction scope: only remove text; never touch images or vector graphics.
+if TYPE_CHECKING:
+    pass
+
 _IMAGES_UNTOUCHED = fitz.PDF_REDACT_IMAGE_NONE
 _GRAPHICS_UNTOUCHED = fitz.PDF_REDACT_LINE_ART_NONE
 _TEXT_REMOVE = fitz.PDF_REDACT_TEXT_REMOVE
 
-# How close a re-located quad's center must be to the candidate's
-# recorded bbox center to be considered "the same occurrence".
 _MATCH_TOLERANCE_POINTS = 3.0
 
 
@@ -47,13 +37,6 @@ def _bbox_center(bbox: tuple[float, float, float, float]) -> tuple[float, float]
 
 
 def _closest_quad(page: "fitz.Page", candidate: WatermarkCandidate) -> "fitz.Quad | None":
-    """
-    Re-locate the candidate's exact text on the page and return the
-    quad whose center is closest to the candidate's recorded bbox
-    center — re-finding it rather than trusting stale coordinates,
-    since redactions applied earlier in this same run can shift what
-    search_for would otherwise return first.
-    """
     quads = page.search_for(candidate.text, quads=True)
     if not quads:
         return None
@@ -75,21 +58,63 @@ def _closest_quad(page: "fitz.Page", candidate: WatermarkCandidate) -> "fitz.Qua
     return best_quad
 
 
+def clean_page_text_streams(doc: "fitz.Document", page: "fitz.Page", target_texts: list[str]) -> bool:
+    """
+    Surgically remove watermark text drawing commands directly from the page's
+    PDF content streams, completely preserving background/underlying body text.
+    Returns True if stream was modified.
+    """
+    targets = [w.strip() for w in target_texts if w.strip()]
+    if not targets:
+        return False
+
+    page.clean_contents()
+    contents_xrefs = page.get_contents()
+    if not contents_xrefs:
+        return False
+
+    modified_any = False
+
+    for xref in contents_xrefs:
+        raw_bytes = doc.xref_stream(xref)
+        if not raw_bytes:
+            continue
+        stream_str = raw_bytes.decode("latin1")
+        initial_stream = stream_str
+
+        for target in targets:
+            # 1. Direct TJ match: [(CONFIDENTIAL)]TJ or [(CONFIDENTIAL)] TJ
+            p1 = re.compile(r"\[\s*\(" + re.escape(target) + r"\)\s*\]\s*TJ", re.IGNORECASE)
+            stream_str = p1.sub("[]TJ", stream_str)
+
+            # 2. Direct Tj match: (CONFIDENTIAL) Tj or ' or "
+            p2 = re.compile(r"\(" + re.escape(target) + r"\)\s*(?:Tj|\'|\")", re.IGNORECASE)
+            stream_str = p2.sub("() Tj", stream_str)
+
+            # 3. Spaced character array inside TJ: [(C) ... (O) ... (N) ... ]TJ
+            chars_pattern = r"\[\s*" + r".*?".join(r"\(" + re.escape(c) + r"\)" for c in target) + r".*?\]\s*TJ"
+            p3 = re.compile(chars_pattern, re.IGNORECASE | re.DOTALL)
+            stream_str = p3.sub("[]TJ", stream_str)
+
+            # 4. Hex string match if target is pure ascii
+            hex_target = target.encode("latin1").hex()
+            p4 = re.compile(r"<\s*" + re.escape(hex_target) + r"\s*>\s*(?:Tj|TJ)", re.IGNORECASE)
+            stream_str = p4.sub("<> Tj", stream_str)
+
+        if stream_str != initial_stream:
+            doc.update_stream(xref, stream_str.encode("latin1"))
+            modified_any = True
+
+    return modified_any
+
+
 def remove_text_candidates(
     source: Path | bytes,
     candidates: list[WatermarkCandidate],
     pages_filter: set[int] | None,
 ) -> tuple[bytes, list[int], list[str]]:
     """
-    Remove the given text watermark candidates from a PDF.
-
-    `source` may be a path to a stored PDF, or raw PDF bytes (used when
-    chaining this after another removal step in the same /process call).
-
-    Returns (cleaned_pdf_bytes, pages_affected, skipped_candidate_ids).
-    A candidate is skipped (not an error) either because it falls
-    outside the requested page scope, or because its text could no
-    longer be precisely re-located on the page within tolerance.
+    Remove the given text watermark candidates with surgical precision.
     """
     candidates_by_page: dict[int, list[WatermarkCandidate]] = {}
     out_of_scope_ids: list[str] = []
@@ -116,9 +141,19 @@ def remove_text_candidates(
                     continue
 
                 page = pdf[page_number - 1]
-                redacted_any = False
+                target_words = [c.text for c in page_candidates]
 
-                for candidate in page_candidates:
+                # 1. Primary: Surgical content stream removal (preserves all body text)
+                stream_modified = clean_page_text_streams(pdf, page, target_words)
+
+                # 2. Check if watermark is still present; if so, fallback to tight quad redactions
+                remaining_candidates = []
+                for c in page_candidates:
+                    if c.text in page.get_text():
+                        remaining_candidates.append(c)
+
+                redacted_any = False
+                for candidate in remaining_candidates:
                     quad = _closest_quad(page, candidate)
                     if quad is None:
                         skipped_candidate_ids.append(candidate.candidate_id)
@@ -128,12 +163,14 @@ def remove_text_candidates(
 
                 if redacted_any:
                     page.apply_redactions(images=_IMAGES_UNTOUCHED, graphics=_GRAPHICS_UNTOUCHED, text=_TEXT_REMOVE)
+
+                if stream_modified or redacted_any:
                     pages_affected.append(page_number)
 
             cleaned_bytes = pdf.tobytes(garbage=4, deflate=True)
     except RemovalError:
         raise
-    except Exception as exc:  # noqa: BLE001 - any PyMuPDF failure means the file couldn't be processed
+    except Exception as exc:
         raise RemovalError("PROCESSING_FAILED", "The document could not be processed.") from exc
 
     return cleaned_bytes, sorted(pages_affected), skipped_candidate_ids

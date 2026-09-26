@@ -19,20 +19,8 @@ export function Navbar() {
           </div>
         </a>
 
-        {/* Navigation Links */}
-        <nav className="hidden items-center gap-6 md:flex">
-          <a
-            href="#tools"
-            className="text-sm font-medium text-slate-600 transition-colors hover:text-brand-600"
-          >
-            Categories
-          </a>
-          <a
-            href="#tools"
-            className="text-sm font-medium text-slate-600 transition-colors hover:text-brand-600"
-          >
-            All Tools
-          </a>
+        {/* Navigation Links - Only showing active working features */}
+        <nav className="flex items-center gap-6">
           <a
             href="#how-to-use"
             className="text-sm font-medium text-slate-600 transition-colors hover:text-brand-600"
@@ -45,13 +33,25 @@ export function Navbar() {
           >
             Features
           </a>
+
+          {/* ========================================================================= */}
+          {/* FUTURE LINKS: Uncomment when additional categories / tools are built      */}
+          {/*
+          <a href="#categories" className="text-sm font-medium text-slate-600 hover:text-brand-600">
+            Categories
+          </a>
+          <a href="#all-tools" className="text-sm font-medium text-slate-600 hover:text-brand-600">
+            All Tools
+          </a>
+          */}
+          {/* ========================================================================= */}
         </nav>
 
-        {/* Right CTA */}
+        {/* Right Active Status Badge */}
         <div className="flex items-center gap-3">
-          <span className="inline-flex items-center gap-1.5 rounded-full bg-brand-50 px-3 py-1 text-xs font-semibold text-brand-700 border border-brand-200/60">
-            <Sparkles className="h-3 w-3 text-brand-600" />
-            v2.0 Pro
+          <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-700 border border-emerald-200/80">
+            <Sparkles className="h-3 w-3 text-emerald-600" />
+            PDF & PPTX Engine
           </span>
         </div>
       </div>

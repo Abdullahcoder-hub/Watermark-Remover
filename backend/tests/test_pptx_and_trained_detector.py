@@ -225,3 +225,58 @@ def test_pptx_slide_preview() -> None:
     assert preview_resp.status_code == 200
     assert preview_resp.headers["content-type"] == "image/jpeg"
     assert len(preview_resp.content) > 100
+
+
+def test_no_false_positives_on_normal_document_text() -> None:
+    """Test that normal body text (containing words like democracy, author names, repeated headers) is NOT falsely flagged."""
+    normal_texts = [
+        "Fukuyama's 'End of History' thesis suggested the final triumph of liberal democracy.",
+        "Meaning and Concept of Ideology",
+        "Abdullah Waqar",
+        "Submitted by:",
+        "Naeem Ilyas",
+        "Ahmad Raza",
+        "Daniyal Shahid",
+        "Department of Computer Science, National University of Modern Languages",
+    ]
+
+    pages = []
+    for page_num in range(1, 4):
+        text_objs = [
+            TextObject(
+                text=txt,
+                page=page_num,
+                bbox=(50.0, 100.0 + idx * 30.0, 450.0, 120.0 + idx * 30.0),
+                font="Times-Roman",
+                size=12.0,
+                rotation_degrees=0.0,
+            )
+            for idx, txt in enumerate(normal_texts)
+        ]
+        pages.append(
+            PageAnalysis(
+                page_number=page_num,
+                width=612.0,
+                height=792.0,
+                is_scanned=False,
+                extractable_text_length=sum(len(t.text) for t in text_objs),
+                text_object_count=len(text_objs),
+                image_count=0,
+                text_objects=text_objs,
+                images=[],
+            )
+        )
+
+    analysis = DocumentAnalysisResponse(
+        document_id="doc-normal",
+        page_count=3,
+        total_text_objects=len(normal_texts) * 3,
+        total_images=0,
+        appears_scanned=False,
+        pages=pages,
+    )
+
+    candidates = generate_candidates(analysis)
+    # None of these normal body lines should be detected as watermarks
+    assert len(candidates) == 0, f"False positives detected: {[c.text for c in candidates]}"
+
