@@ -35,3 +35,6 @@ Thumbs.db
 *.log
 # Generated watermark-removal results
 backend/results/
+uploads/
+backend/uploads/
+results/
