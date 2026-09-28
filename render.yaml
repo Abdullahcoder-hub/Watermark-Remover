@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: watermark-remover-api
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    plan: free
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: MAX_UPLOAD_SIZE_MB
+        value: "50"
+      - key: MAX_PAGES
+        value: "100"
+      - key: MAX_PROCESSING_TIME
+        value: "300"
+      - key: FILE_RETENTION_MINUTES
+        value: "30"
+      - key: FRONTEND_URL
+        sync: false
+      - key: ALLOWED_ORIGINS
+        sync: false

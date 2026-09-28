@@ -150,6 +150,14 @@ async def upload_document(file: UploadFile = File(...)) -> DocumentUploadRespons
             logger.warning("upload_unreadable_pdf job_id=%s", document_id)
             raise _api_error(400, "INVALID_PDF", "The uploaded file is not a valid or readable PDF.") from exc
 
+    if page_count is not None and page_count > settings.max_pages:
+        stored_path.unlink(missing_ok=True)
+        raise _api_error(
+            400,
+            "PAGE_LIMIT_EXCEEDED",
+            f"The document exceeds the maximum limit of {settings.max_pages} pages (has {page_count} pages).",
+        )
+
     record = DocumentRecord(
         document_id=document_id,
         original_filename=file.filename or f"document{ext}",
@@ -326,8 +334,14 @@ async def download_document(document_id: str) -> FileResponse:
     if record is None:
         raise _api_error(404, "DOCUMENT_NOT_FOUND", "No document was found with that ID.")
 
-    if not record.result_path or not Path(record.result_path).exists():
+    if not record.result_path:
         raise _api_error(400, "NOT_PROCESSED", "This document has not been processed yet.")
+
+    res_path = Path(record.result_path).resolve()
+    allowed_dirs = [settings.result_path.resolve(), settings.upload_path.resolve()]
+    if not any(res_path.is_relative_to(d) for d in allowed_dirs) or not res_path.exists():
+        logger.warning("unauthorized_path_access job_id=%s path=%s", document_id, record.result_path)
+        raise _api_error(404, "FILE_NOT_FOUND", "The requested document file could not be found.")
 
     is_ppt = _is_pptx(record)
     media_type = (
@@ -338,7 +352,7 @@ async def download_document(document_id: str) -> FileResponse:
     download_ext = ".pptx" if is_ppt else ".pdf"
 
     return FileResponse(
-        path=record.result_path,
+        path=str(res_path),
         media_type=media_type,
         filename=_safe_download_filename(record.original_filename, download_ext),
     )
@@ -354,9 +368,13 @@ async def preview_page(document_id: str, page_number: int, version: str = "curre
         raise _api_error(400, "INVALID_VERSION", "version must be 'current' or 'original'.")
 
     source_path = Path(record.stored_path) if version == "original" else _current_source_path(record)
+    source_resolved = source_path.resolve()
+    allowed_dirs = [settings.result_path.resolve(), settings.upload_path.resolve()]
+    if not any(source_resolved.is_relative_to(d) for d in allowed_dirs) or not source_resolved.exists():
+        raise _api_error(404, "FILE_NOT_FOUND", "The source document file could not be found.")
 
     try:
-        mtime = source_path.stat().st_mtime
+        mtime = source_resolved.stat().st_mtime
     except OSError:
         mtime = 0.0
 

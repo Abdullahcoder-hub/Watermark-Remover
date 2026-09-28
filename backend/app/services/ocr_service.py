@@ -102,7 +102,11 @@ def add_ocr_text_layer(source: Path | bytes, target_pages: list[int]) -> tuple[b
             result_bytes = pdf.tobytes(garbage=4, deflate=True)
     except OcrError:
         raise
+    except (pytesseract.TesseractNotFoundError, FileNotFoundError) as exc:
+        logger.warning("tesseract_not_available: %s", exc)
+        raise OcrError("OCR_ENGINE_NOT_AVAILABLE", "Tesseract OCR engine is not available on this server.") from exc
     except Exception as exc:  # noqa: BLE001 - any PyMuPDF/Tesseract failure means OCR couldn't complete
-        raise OcrError("OCR_FAILED", "OCR could not be completed for this document.") from exc
+        logger.error("ocr_processing_failed: %s", exc)
+        raise OcrError("OCR_FAILED", f"OCR could not be completed for this document: {exc}") from exc
 
     return result_bytes, words_by_page

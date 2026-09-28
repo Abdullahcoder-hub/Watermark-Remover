@@ -57,13 +57,12 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Only the configured frontend origin is allowed — never "*" for an
-# authenticated/credentialed API.
+# Production & development CORS origins configuration
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[settings.frontend_url],
+    allow_origins=settings.cors_origins,
     allow_credentials=True,
-    allow_methods=["GET", "POST", "DELETE"],
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS", "HEAD"],
     allow_headers=["*"],
 )
 
