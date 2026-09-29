@@ -132,7 +132,11 @@ def _extract_shape_text(sp: ET.Element) -> str:
     return " ".join(text_parts).strip()
 
 
-def analyze_pptx(document_id: str, path: Path) -> DocumentAnalysisResponse:
+def analyze_pptx(
+    document_id: str,
+    path: Path,
+    progress_callback: Callable[[int, int, str], None] | None = None,
+) -> DocumentAnalysisResponse:
     """
     Extract structure (text objects and image objects) from a PPTX file.
     Inspects slides, slide masters, and layouts.
@@ -170,8 +174,15 @@ def analyze_pptx(document_id: str, path: Path) -> DocumentAnalysisResponse:
             pages: list[PageAnalysis] = []
             total_text_objects = 0
             total_images = 0
+            total_slides = max(len(slide_entries), 1)
 
             for slide_index, (slide_num, slide_name) in enumerate(slide_entries, start=1):
+                if progress_callback is not None:
+                    progress_callback(
+                        slide_index,
+                        total_slides,
+                        f"Analyzing PowerPoint — slide {slide_index} of {total_slides}",
+                    )
                 slide_xml = zf.read(slide_name)
                 slide_tree = ET.fromstring(slide_xml)
 
@@ -253,6 +264,8 @@ def analyze_pptx(document_id: str, path: Path) -> DocumentAnalysisResponse:
                 total_images=total_images,
                 appears_scanned=False,
                 pages=pages,
+                total_scanned=len(pages),
+                failed_pages=[],
             )
     except Exception as exc:
         logger.error("analyze_pptx_failed: %s", exc, exc_info=True)
@@ -263,6 +276,7 @@ def remove_pptx_watermarks(
     source_path: Path,
     selected_candidates: list[WatermarkCandidate],
     pages_filter: set[int] | None = None,
+    progress_callback: Callable[[int, int, str], None] | None = None,
 ) -> tuple[bytes, list[int], list[str]]:
     """
     Remove selected watermark candidates from PPTX slides, slide masters, and layouts.

@@ -1,13 +1,6 @@
 """
-Minimal in-memory document registry for the Phase 1 MVP.
-
-This intentionally avoids introducing PostgreSQL/Redis until the
-project actually needs them (see project rule: don't add services
-before they're necessary). This store is process-local and is lost
-on restart — acceptable for MVP since documents are temporary anyway.
-
-Replace with a real persistence layer only once background workers
-or multi-process deployment make an in-memory dict insufficient.
+In-memory document registry, analysis caching, and job progress tracking.
+Thread-safe process-local state management.
 """
 import threading
 from dataclasses import dataclass, field
@@ -24,12 +17,6 @@ class DocumentRecord:
     status: str = "uploaded"
     stored_path: str = ""
     result_path: str = ""
-    # Tracks whether OCR has ever been successfully applied to this
-    # document (regardless of how few/many words were recognized).
-    # Needed because the "is this page scanned" heuristic isn't
-    # reliable enough to detect "already OCR'd" on its own — a page
-    # where Tesseract recognizes very few words can still measure
-    # under the scanned-text-length threshold even after OCR runs.
     ocr_applied: bool = False
 
 
@@ -77,15 +64,13 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
-# Process-wide singleton for the MVP.
 document_store = DocumentStore()
 
 
 class AnalysisStore:
     """
     Caches the last analysis result per document so the frontend can
-    re-fetch it (e.g. GET .../status) without re-running PyMuPDF.
-    Same process-local, in-memory tradeoff as DocumentStore.
+    re-fetch it without re-running parsing.
     """
 
     def __init__(self) -> None:
@@ -110,8 +95,7 @@ analysis_store = AnalysisStore()
 
 class DetectionStore:
     """
-    Caches the last watermark-candidate list per document, so /process
-    can look up candidates by ID without re-running detection.
+    Caches the last watermark-candidate list per document.
     """
 
     def __init__(self) -> None:
@@ -134,15 +118,82 @@ class DetectionStore:
 detection_store = DetectionStore()
 
 
-class PreviewCache:
+@dataclass
+class JobProgress:
+    document_id: str
+    stage: str = "idle"  # "uploading" | "analyzing" | "detecting" | "processing" | "completed" | "error"
+    current_page: int = 0
+    total_pages: int = 0
+    percent: int = 0
+    message: str = ""
+    candidates_count: int = 0
+    failed_pages: list[int] = field(default_factory=list)
+    error: str | None = None
+    updated_at: datetime = field(default_factory=utcnow)
+
+
+class ProgressStore:
     """
-    Caches rendered page-preview PNGs. Keyed by (document_id, page,
-    file mtime) so a cache entry automatically becomes unreachable
-    the moment the underlying file changes (any removal step
-    rewrites result_path with a new mtime) — no manual invalidation
-    needed. Capped to avoid unbounded growth across many documents.
+    Tracks live incremental progress for large documents (page-by-page progress).
     """
 
+    def __init__(self) -> None:
+        self._progress: dict[str, JobProgress] = {}
+        self._lock = threading.Lock()
+
+    def set(self, document_id: str, progress: JobProgress) -> None:
+        with self._lock:
+            progress.updated_at = utcnow()
+            self._progress[document_id] = progress
+
+    def update(
+        self,
+        document_id: str,
+        stage: str | None = None,
+        current_page: int | None = None,
+        total_pages: int | None = None,
+        message: str | None = None,
+        candidates_count: int | None = None,
+        failed_pages: list[int] | None = None,
+        error: str | None = None,
+    ) -> JobProgress:
+        with self._lock:
+            prog = self._progress.get(document_id)
+            if prog is None:
+                prog = JobProgress(document_id=document_id)
+                self._progress[document_id] = prog
+            if stage is not None:
+                prog.stage = stage
+            if current_page is not None:
+                prog.current_page = current_page
+            if total_pages is not None:
+                prog.total_pages = total_pages
+            if prog.total_pages > 0 and prog.current_page > 0:
+                prog.percent = min(100, int((prog.current_page / prog.total_pages) * 100))
+            if message is not None:
+                prog.message = message
+            if candidates_count is not None:
+                prog.candidates_count = candidates_count
+            if failed_pages is not None:
+                prog.failed_pages = failed_pages
+            if error is not None:
+                prog.error = error
+            prog.updated_at = utcnow()
+            return prog
+
+    def get(self, document_id: str) -> JobProgress | None:
+        with self._lock:
+            return self._progress.get(document_id)
+
+    def delete(self, document_id: str) -> None:
+        with self._lock:
+            self._progress.pop(document_id, None)
+
+
+progress_store = ProgressStore()
+
+
+class PreviewCache:
     _MAX_ENTRIES = 200
 
     def __init__(self) -> None:
@@ -164,7 +215,6 @@ class PreviewCache:
             self._order.append(key)
 
     def delete_document(self, document_id: str) -> None:
-        """Remove every cached preview (any page, any version/mtime) for one document."""
         with self._lock:
             keys_to_remove = [key for key in self._cache if key[0] == document_id]
             for key in keys_to_remove:

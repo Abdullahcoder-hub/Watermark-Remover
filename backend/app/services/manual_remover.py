@@ -34,25 +34,13 @@ from pathlib import Path
 import fitz  # PyMuPDF
 
 from app.schemas.manual import ManualRegion
-from app.services.inpainting import InpaintingError, build_mask, decode_image, encode_png, inpaint
+from app.services.inpainting import InpaintingError, decode_image, encode_png, inpaint
+from app.services.mask_refiner import refine_scanned_mask, refine_vector_regions
 
 _TEXT_REMOVE = fitz.PDF_REDACT_TEXT_REMOVE
 _IMAGES_REMOVE = fitz.PDF_REDACT_IMAGE_REMOVE
-# "if touched" (not "if covered") because a manually drawn box is a
-# deliberate, explicit selection -- any graphics the box overlaps
-# should go, not only ones fully enclosed by it.
 _GRAPHICS_REMOVE = fitz.PDF_REDACT_LINE_ART_REMOVE_IF_TOUCHED
 
-# Classical inpainting (Telea) reconstructs a masked area from its
-# surrounding pixels. It has no source data to work with once the
-# masked area gets large relative to the image, and produces a
-# washed-out/blank-looking result instead -- confirmed directly: a
-# selection covering ~65% of a scanned page came back as a uniform
-# foggy patch, indistinguishable from data loss even though nothing
-# was silently destroyed by the removal logic itself. Rather than
-# let that happen quietly, a selection this large on a scanned page
-# is rejected with an explanation instead of "succeeding" into a
-# ruined page.
 MAX_INPAINT_AREA_FRACTION = 0.20
 
 
@@ -74,11 +62,6 @@ def _regions_for_document(regions: list[ManualRegion], page_count: int, apply_to
     return expanded
 
 
-# Same defense-in-depth as the automatic removal path
-# (watermark_remover.py / image_remover.py): never let a redaction box
-# delete an image that dominates the page, even on a page that wasn't
-# classified as "scanned" — since that classification can be wrong
-# (see SCANNED_IMAGE_COVERAGE_THRESHOLD's history in pdf_analyzer.py).
 MAX_REDACTABLE_IMAGE_COVERAGE = 0.5
 
 
@@ -88,8 +71,11 @@ def _rects_overlap(a: "fitz.Rect", b: "fitz.Rect") -> bool:
 
 def _redact_page(page: "fitz.Page", regions: list[ManualRegion], page_width: float, page_height: float) -> None:
     page_area = page_width * page_height
+    # Intelligently snap manual selection guidance to complete word bounding boxes
+    refined_tuples = refine_vector_regions(page, [(r.x0, r.y0, r.x1, r.y1) for r in regions])
     region_rects = [
-        fitz.Rect(r.x0 * page_width, r.y0 * page_height, r.x1 * page_width, r.y1 * page_height) for r in regions
+        fitz.Rect(rx0 * page_width, ry0 * page_height, rx1 * page_width, ry1 * page_height)
+        for rx0, ry0, rx1, ry1 in refined_tuples
     ]
 
     if page_area > 0:
@@ -118,24 +104,6 @@ def _redact_page(page: "fitz.Page", regions: list[ManualRegion], page_width: flo
 
 
 def _inpaint_page(pdf: "fitz.Document", page: "fitz.Page", xref: int, regions: list[ManualRegion]) -> None:
-    # Order and method matter here, both confirmed by direct testing:
-    # apply_redactions() silently corrupts *other* images on the same
-    # page -- even ones it was never asked to touch -- immediately
-    # within the same session, well before any save. A page with a
-    # dominant scan (xref A) and a small logo (xref B) lost BOTH images
-    # after redacting only B. replace_image()-based calls don't have
-    # this problem: they only affect the xref they're given. So overlay
-    # removal here uses delete_image() (built on replace_image, not
-    # redaction) instead of add_redact_annot()/apply_redactions().
-
-    # Step 1: delete any SEPARATE small image overlapping the selection.
-    # Confirmed directly on a real CamScanner export: the visible logo
-    # is often its own small image object layered on top of the main
-    # scan, not baked into the scan's pixels -- inpainting the dominant
-    # image alone leaves such a logo completely untouched, since it's a
-    # distinct object drawn on top. Small overlay images are safe to
-    # clear this way; they're nowhere near large enough to trip
-    # MAX_REDACTABLE_IMAGE_COVERAGE.
     page_area = page.rect.width * page.rect.height
     region_rects = [
         fitz.Rect(r.x0 * page.rect.width, r.y0 * page.rect.height, r.x1 * page.rect.width, r.y1 * page.rect.height)
@@ -153,21 +121,19 @@ def _inpaint_page(pdf: "fitz.Document", page: "fitz.Page", xref: int, regions: l
             image_rect = fitz.Rect(bbox)
             coverage = (image_rect.width * image_rect.height) / page_area
             if coverage > MAX_REDACTABLE_IMAGE_COVERAGE:
-                continue  # not a small overlay -- leave it alone here
+                continue
             if not any(image_rect.intersects(region_rect) for region_rect in region_rects):
                 continue
             page.delete_image(overlay_xref)
 
-    # Step 2: inpaint the dominant scan image for the selected region(s),
-    # in case any part of the watermark is baked directly into the scan
-    # itself rather than (or in addition to) a separate overlay image.
+    # Step 2: Extract scan image and build intelligent adaptive inpainting mask
     base = pdf.extract_image(xref)
     image = decode_image(base["image"])
-    height, width = image.shape[:2]
 
-    mask = build_mask((height, width), [(r.x0, r.y0, r.x1, r.y1) for r in regions])
+    mask, masked_fraction = refine_scanned_mask(
+        image, [(r.x0, r.y0, r.x1, r.y1) for r in regions]
+    )
 
-    masked_fraction = float((mask > 0).sum()) / float(height * width)
     if masked_fraction > MAX_INPAINT_AREA_FRACTION:
         raise ManualRemovalError(
             "SELECTION_TOO_LARGE",
@@ -186,6 +152,7 @@ def remove_manual_regions(
     regions: list[ManualRegion],
     apply_to_all_pages: bool,
     scanned_pages: dict[int, int] | None = None,
+    progress_callback: object = None,
 ) -> tuple[bytes, list[int]]:
     """
     Remove everything inside each manually-selected region.
@@ -198,6 +165,8 @@ def remove_manual_regions(
 
     Returns (cleaned_pdf_bytes, pages_affected).
     """
+    import gc
+
     scanned_pages = scanned_pages or {}
     pages_affected: list[int] = []
 
@@ -217,7 +186,15 @@ def remove_manual_regions(
             if not regions_by_page:
                 raise ManualRemovalError("INVALID_PAGE", f"No valid pages in the selection (document has {pdf.page_count} pages).")
 
-            for page_number, page_regions in regions_by_page.items():
+            total_target_pages = len(regions_by_page)
+            for idx, (page_number, page_regions) in enumerate(regions_by_page.items()):
+                if callable(progress_callback):
+                    progress_callback(
+                        idx + 1,
+                        total_target_pages,
+                        f"Applying manual removal — page {page_number} of {pdf.page_count}",
+                    )
+
                 page = pdf[page_number - 1]
 
                 if page_number in scanned_pages:
@@ -226,6 +203,8 @@ def remove_manual_regions(
                     _redact_page(page, page_regions, page.rect.width, page.rect.height)
 
                 pages_affected.append(page_number)
+                if (idx + 1) % 5 == 0:
+                    gc.collect()
 
             cleaned_bytes = pdf.tobytes(garbage=4, deflate=True)
     except (ManualRemovalError, InpaintingError) as exc:

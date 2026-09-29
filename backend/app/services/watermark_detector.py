@@ -1,9 +1,16 @@
 """
-Watermark candidate detector (Text, Images, and Multi-format Signatures).
+Multi-Signal Document-Aware Watermark Detector.
 
 Trained heuristic AI pattern detector for identifying true watermarks across all document
-types (PDF, PPTX, scanned documents) without false-positive triggers on normal document text,
-names, or running headers.
+types (PDF, PPTX, scanned documents) without false-positive triggers on normal body text,
+headings, or running headers.
+
+Signals evaluated:
+1. Semantic signature matching (CamScanner, Gamma, Canva, Adobe Scan, Confidential stamps, etc.)
+2. Cross-page / cross-slide repetition intelligence (text, images, shapes at matching relative coordinates)
+3. Geometry & layout anomalies (diagonal/rotated angles, large height ratios, corner badges, centered stamps)
+4. Color & contrast signals (faint/low-opacity gray text, stamp tones)
+5. Transparency & Alpha mask analysis
 """
 from __future__ import annotations
 
@@ -15,7 +22,7 @@ from app.schemas.analysis import DocumentAnalysisResponse, ImageObject, TextObje
 from app.schemas.watermark import WatermarkCandidate
 from app.services.pdf_analyzer import SCANNED_IMAGE_COVERAGE_THRESHOLD
 
-# Explicit standalone watermark keywords (must match whole word with \b)
+# Explicit standalone watermark keywords
 EXPLICIT_WATERMARK_WORDS = {
     "confidential",
     "strictly confidential",
@@ -46,9 +53,10 @@ EXPLICIT_WATERMARK_WORDS = {
     "provisional",
     "embargoed",
     "unauthorized reproduction",
+    "copy",
 }
 
-# Regex patterns with word boundaries for tool-specific watermark phrases
+# Regex patterns for tool-specific watermark signatures
 EXPLICIT_WATERMARK_REGEXES: list[re.Pattern] = [
     # CamScanner & Mobile Scanners
     re.compile(r"\b(?:scanned\s+(?:with|by)\s+)?camscanner(?:\.com)?\b", re.IGNORECASE),
@@ -75,7 +83,7 @@ EXPLICIT_WATERMARK_REGEXES: list[re.Pattern] = [
     re.compile(r"\bnitro\s+pdf\b", re.IGNORECASE),
     re.compile(r"\bfoxit\s+pdf\b", re.IGNORECASE),
 
-    # Version & Status Patterns
+    # Document Management & Status Stamps
     re.compile(r"\b(?:trial|evaluation|unregistered|demo)\s+version\b", re.IGNORECASE),
     re.compile(r"\bdocu?sign\s+envelope\s+id:?\s*[0-9a-f\-]+", re.IGNORECASE),
     re.compile(r"\bsigned\s+with\s+pandadoc\b", re.IGNORECASE),
@@ -86,21 +94,23 @@ EXPLICIT_WATERMARK_REGEXES: list[re.Pattern] = [
 EXPLICIT_SIGNATURE_SCORE = 0.95
 ROTATION_WEIGHT = 0.35
 LARGE_SIZE_WEIGHT = 0.15
-REPETITION_BOOST = 0.15
-
-ROTATION_TOLERANCE_DEGREES = 2.0
-LARGE_TEXT_HEIGHT_RATIO = 0.05  # span height vs. page height
-MIN_PAGES_FOR_REPETITION = 3
-
-IMAGE_REPETITION_WEIGHT = 0.40
+REPETITION_BOOST_HIGH = 0.35
+REPETITION_BOOST_MED = 0.20
+FAINT_COLOR_WEIGHT = 0.15
+CENTERED_WEIGHT = 0.10
+CORNER_LOGO_WEIGHT = 0.25
 TRANSPARENCY_WEIGHT = 0.30
 MODERATE_SIZE_WEIGHT = 0.20
-CENTERED_WEIGHT = 0.10
-CORNER_LOGO_WEIGHT = 0.20
 
-MIN_WATERMARK_IMAGE_COVERAGE = 0.02
+ROTATION_TOLERANCE_DEGREES = 2.0
+LARGE_TEXT_HEIGHT_RATIO = 0.05
+MIN_WATERMARK_IMAGE_COVERAGE = 0.015
 MAX_WATERMARK_IMAGE_COVERAGE = SCANNED_IMAGE_COVERAGE_THRESHOLD
 CENTERED_TOLERANCE_FRACTION = 0.35
+
+# Color helpers
+FAINT_GRAY_PREFIXES = ("#c", "#d", "#e", "#b0", "#a8", "#9e", "#88")
+STAMP_RED_PREFIXES = ("#f0", "#e0", "#d0", "#c0", "#b0", "#ff")
 
 
 def _is_rotated(rotation_degrees: float) -> bool:
@@ -109,51 +119,76 @@ def _is_rotated(rotation_degrees: float) -> bool:
 
 
 def _matches_explicit_signature(text: str) -> bool:
-    """
-    Check if text contains a recognized watermark phrase using strict word boundaries.
-    Never matches partial substrings inside normal words (e.g. 'demo' inside 'democracy').
-    """
     normalized = text.strip().lower()
-
-    # Exact whole-phrase or word-boundary check
     for word in EXPLICIT_WATERMARK_WORDS:
-        pattern = r"\b" + re.escape(word) + r"\b"
-        if re.search(pattern, normalized):
+        if re.search(r"\b" + re.escape(word) + r"\b", normalized):
             return True
-
     for regex in EXPLICIT_WATERMARK_REGEXES:
         if regex.search(normalized):
             return True
-
     return False
+
+
+def _is_faint_or_stamp_color(color: str | None) -> bool:
+    if not color:
+        return False
+    c = color.lower()
+    return any(c.startswith(prefix) for prefix in FAINT_GRAY_PREFIXES)
+
+
+def _is_centered(bbox: tuple[float, float, float, float], page_width: float, page_height: float) -> bool:
+    if page_width <= 0 or page_height <= 0:
+        return False
+    cx = (bbox[0] + bbox[2]) / 2
+    cy = (bbox[1] + bbox[3]) / 2
+    x_offset = abs(cx - page_width / 2) / page_width
+    y_offset = abs(cy - page_height / 2) / page_height
+    return x_offset <= CENTERED_TOLERANCE_FRACTION and y_offset <= CENTERED_TOLERANCE_FRACTION
+
+
+def _is_corner_badge(bbox: tuple[float, float, float, float], page_width: float, page_height: float) -> bool:
+    if page_width <= 0 or page_height <= 0:
+        return False
+    bottom_frac = bbox[3] / page_height
+    right_frac = bbox[2] / page_width
+    left_frac = bbox[0] / page_width
+    top_frac = bbox[1] / page_height
+
+    is_bottom_corner = bottom_frac >= 0.85 and (left_frac <= 0.25 or right_frac >= 0.75)
+    is_top_corner = top_frac <= 0.15 and (left_frac <= 0.25 or right_frac >= 0.75)
+    return is_bottom_corner or is_top_corner
 
 
 def _generate_text_candidates(analysis: DocumentAnalysisResponse) -> list[WatermarkCandidate]:
     page_heights = {page.page_number: page.height for page in analysis.pages}
+    page_widths = {page.page_number: page.width for page in analysis.pages}
 
     occurrences_by_text: dict[str, list[TextObject]] = defaultdict(list)
     for page in analysis.pages:
         for obj in page.text_objects:
             normalized = obj.text.strip().lower()
-            if normalized:
+            if normalized and len(normalized) >= 2:
                 occurrences_by_text[normalized].append(obj)
 
     candidates: list[WatermarkCandidate] = []
 
     for normalized_text, occurrences in occurrences_by_text.items():
         pages_with_text = {o.page for o in occurrences}
-        is_repeated = len(pages_with_text) >= MIN_PAGES_FOR_REPETITION
+        page_rep_count = len(pages_with_text)
         is_explicit_match = _matches_explicit_signature(normalized_text)
 
         for obj in occurrences:
             is_rotated = _is_rotated(obj.rotation_degrees)
             page_height = page_heights.get(obj.page, 0.0)
+            page_width = page_widths.get(obj.page, 0.0)
             span_height = obj.bbox[3] - obj.bbox[1]
             is_large = page_height > 0 and (span_height / page_height) > LARGE_TEXT_HEIGHT_RATIO
+            is_faint = _is_faint_or_stamp_color(obj.color)
+            is_corner = _is_corner_badge(obj.bbox, page_width, page_height)
+            is_center = _is_centered(obj.bbox, page_width, page_height)
 
-            # Strict Filter: Must be an explicit signature OR a rotated watermark overlay
-            # Normal repeated text (like author names, running headers, titles) is NOT a watermark
-            if not is_explicit_match and not is_rotated:
+            # Signal filtering: Normal body text without watermark characteristics is ignored
+            if not is_explicit_match and not is_rotated and not (page_rep_count >= 3 and (is_faint or is_large or is_center)):
                 continue
 
             score = 0.0
@@ -161,19 +196,29 @@ def _generate_text_candidates(analysis: DocumentAnalysisResponse) -> list[Waterm
 
             if is_explicit_match:
                 score += EXPLICIT_SIGNATURE_SCORE
-                reasons.append("matches common watermark wording")
+                reasons.append("matches known watermark phrase")
 
             if is_rotated:
                 score += ROTATION_WEIGHT
                 reasons.append(f"rotated {obj.rotation_degrees}°")
 
-            if is_repeated:
-                score += REPETITION_BOOST
-                reasons.append(f"same text appears on {len(pages_with_text)} pages")
+            if page_rep_count >= 3:
+                score += REPETITION_BOOST_HIGH
+                reasons.append(f"repeated across {page_rep_count} pages in document")
+            elif page_rep_count >= 2:
+                score += REPETITION_BOOST_MED
+                reasons.append(f"appears on {page_rep_count} pages")
 
             if is_large:
                 score += LARGE_SIZE_WEIGHT
-                reasons.append("large relative to the page")
+                reasons.append("large prominent text overlay")
+
+            if is_faint:
+                score += FAINT_COLOR_WEIGHT
+                reasons.append("low contrast background coloring")
+
+            if is_corner:
+                reasons.append("located in corner watermark stamp region")
 
             if score <= 0:
                 continue
@@ -196,28 +241,6 @@ def _generate_text_candidates(analysis: DocumentAnalysisResponse) -> list[Waterm
     return candidates
 
 
-def _is_centered(bbox: tuple[float, float, float, float], page_width: float, page_height: float) -> bool:
-    if page_width <= 0 or page_height <= 0:
-        return False
-    cx = (bbox[0] + bbox[2]) / 2
-    cy = (bbox[1] + bbox[3]) / 2
-    x_offset = abs(cx - page_width / 2) / page_width
-    y_offset = abs(cy - page_height / 2) / page_height
-    return x_offset <= CENTERED_TOLERANCE_FRACTION and y_offset <= CENTERED_TOLERANCE_FRACTION
-
-
-def _is_corner_logo(bbox: tuple[float, float, float, float], page_width: float, page_height: float) -> bool:
-    """Check if an image sits at bottom-left or bottom-right corner (typical of CamScanner/Gamma logos)."""
-    if page_width <= 0 or page_height <= 0:
-        return False
-    bottom_frac = bbox[3] / page_height
-    right_frac = bbox[2] / page_width
-    left_frac = bbox[0] / page_width
-    is_bottom = bottom_frac >= 0.88
-    is_corner = left_frac <= 0.20 or right_frac >= 0.80
-    return is_bottom and is_corner
-
-
 def _generate_image_candidates(analysis: DocumentAnalysisResponse) -> list[WatermarkCandidate]:
     page_dims = {page.page_number: (page.width, page.height) for page in analysis.pages}
 
@@ -238,24 +261,24 @@ def _generate_image_candidates(analysis: DocumentAnalysisResponse) -> list[Water
             reasons: list[str] = []
 
             if is_repeated:
-                score += IMAGE_REPETITION_WEIGHT
-                reasons.append(f"same image appears on {len(pages_with_image)} pages")
+                score += (REPETITION_BOOST_HIGH if len(pages_with_image) >= 3 else REPETITION_BOOST_MED)
+                reasons.append(f"repeated image on {len(pages_with_image)} pages")
 
             if img.has_alpha:
                 score += TRANSPARENCY_WEIGHT
-                reasons.append("has transparency, typical of watermark overlays")
+                reasons.append("transparent alpha layer typical of watermark overlay")
 
             score += MODERATE_SIZE_WEIGHT
-            reasons.append("moderate size relative to the page")
+            reasons.append("overlay dimensions consistent with badge/stamp")
 
             page_width, page_height = page_dims.get(img.page, (0.0, 0.0))
             if _is_centered(img.bbox, page_width, page_height):
                 score += CENTERED_WEIGHT
-                reasons.append("roughly centered on the page")
+                reasons.append("centered page stamp placement")
 
-            if _is_corner_logo(img.bbox, page_width, page_height):
+            if _is_corner_badge(img.bbox, page_width, page_height):
                 score += CORNER_LOGO_WEIGHT
-                reasons.append("positioned in corner watermark badge zone")
+                reasons.append("positioned in corner scanner badge area")
 
             if score <= 0:
                 continue
@@ -264,7 +287,7 @@ def _generate_image_candidates(analysis: DocumentAnalysisResponse) -> list[Water
                 WatermarkCandidate(
                     candidate_id=str(uuid.uuid4()),
                     type="image",
-                    text=f"Image ({img.width}\u00d7{img.height})",
+                    text=f"Image ({img.width}×{img.height})",
                     page=img.page,
                     bbox=img.bbox,
                     rotation_degrees=0.0,
@@ -278,7 +301,9 @@ def _generate_image_candidates(analysis: DocumentAnalysisResponse) -> list[Water
 
 
 def generate_candidates(analysis: DocumentAnalysisResponse) -> list[WatermarkCandidate]:
-    """Generate all text and image watermark candidates scored by heuristic AI rules."""
+    """
+    Generate all text and image watermark candidates scored by multi-signal document intelligence.
+    """
     candidates = _generate_text_candidates(analysis) + _generate_image_candidates(analysis)
     candidates.sort(key=lambda c: c.confidence, reverse=True)
     return candidates

@@ -1,11 +1,10 @@
 """
-Response models for the document analyzer (Phase 2).
+Response models for the document analyzer (Phase 2 & Upgraded Intelligent Pipeline).
 
-These describe raw extracted structure (text objects, images, whether
-a page is scanned) — not watermark candidates. Watermark scoring is a
-later phase; this is the data it will be built on top of.
+Describes extracted structure (text objects, images, scanned status, failure resilience)
+across small and large documents.
 """
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class TextObject(BaseModel):
@@ -36,8 +35,10 @@ class PageAnalysis(BaseModel):
     extractable_text_length: int
     text_object_count: int
     image_count: int
-    text_objects: list[TextObject]
-    images: list[ImageObject]
+    text_objects: list[TextObject] = Field(default_factory=list)
+    images: list[ImageObject] = Field(default_factory=list)
+    has_error: bool = False
+    error_message: str | None = None
 
 
 class DocumentAnalysisResponse(BaseModel):
@@ -48,3 +49,5 @@ class DocumentAnalysisResponse(BaseModel):
     total_images: int
     appears_scanned: bool
     pages: list[PageAnalysis]
+    total_scanned: int = 0
+    failed_pages: list[int] = Field(default_factory=list)

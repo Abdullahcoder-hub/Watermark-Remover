@@ -41,7 +41,7 @@ from app.services.scanned_detector import scanned_page_xrefs
 from app.services.text_remover import RemovalError
 from app.services.watermark_detector import generate_candidates
 from app.services.watermark_remover import remove_candidates
-from app.utils.document_store import DocumentRecord, analysis_store, detection_store, document_store, preview_cache, utcnow
+from app.utils.document_store import DocumentRecord, analysis_store, detection_store, document_store, preview_cache, progress_store, utcnow
 from app.utils.file_validation import (
     FileValidationError,
     generate_document_id,
@@ -167,6 +167,13 @@ async def upload_document(file: UploadFile = File(...)) -> DocumentUploadRespons
         stored_path=str(stored_path),
     )
     document_store.add(record)
+    progress_store.update(
+        document_id,
+        stage="uploaded",
+        current_page=0,
+        total_pages=page_count or 0,
+        message="Upload completed successfully",
+    )
 
     logger.info("upload_success job_id=%s size_bytes=%s pages=%s type=%s", document_id, record.size_bytes, page_count, ext)
 
@@ -187,19 +194,38 @@ async def analyze_document_route(document_id: str) -> DocumentAnalysisResponse:
         raise _api_error(404, "DOCUMENT_NOT_FOUND", "No document was found with that ID.")
 
     document_store.set_status(document_id, "analyzing")
+    progress_store.update(document_id, stage="analyzing", current_page=0, total_pages=record.page_count or 0, message="Starting document analysis...")
+
+    def on_progress(current: int, total: int, msg: str) -> None:
+        progress_store.update(
+            document_id,
+            stage="analyzing",
+            current_page=current,
+            total_pages=total,
+            message=msg,
+        )
 
     try:
         source_path = Path(record.stored_path)
         if _is_pptx(record):
-            result = analyze_pptx(document_id, source_path)
+            result = analyze_pptx(document_id, source_path, progress_callback=on_progress)
         else:
-            result = analyze_document(document_id, source_path)
+            result = analyze_document(document_id, source_path, progress_callback=on_progress)
     except (AnalysisError, PptxProcessingError) as exc:
         document_store.set_status(document_id, "uploaded")
+        progress_store.update(document_id, stage="error", error=exc.message, message=exc.message)
         raise _api_error(400, exc.code, exc.message) from exc
 
     analysis_store.set(document_id, result)
     document_store.set_status(document_id, "analyzed")
+    progress_store.update(
+        document_id,
+        stage="analyzed",
+        current_page=result.page_count,
+        total_pages=result.page_count,
+        message=f"Analysis complete: {result.page_count} pages scanned",
+        failed_pages=result.failed_pages,
+    )
 
     logger.info(
         "analyze_success job_id=%s pages=%s text_objects=%s images=%s scanned=%s",
@@ -211,6 +237,41 @@ async def analyze_document_route(document_id: str) -> DocumentAnalysisResponse:
     )
 
     return result
+
+
+@router.get("/{document_id}/progress")
+async def get_document_progress(document_id: str) -> dict:
+    record = document_store.get(document_id)
+    if record is None:
+        raise _api_error(404, "DOCUMENT_NOT_FOUND", "No document was found with that ID.")
+
+    prog = progress_store.get(document_id)
+    if prog is None:
+        return {
+            "success": True,
+            "document_id": document_id,
+            "stage": record.status,
+            "current_page": 0,
+            "total_pages": record.page_count or 0,
+            "percent": 100 if record.status in ("analyzed", "detected", "processed") else 0,
+            "message": f"Document is {record.status}",
+            "candidates_count": 0,
+            "failed_pages": [],
+            "error": None,
+        }
+
+    return {
+        "success": True,
+        "document_id": prog.document_id,
+        "stage": prog.stage,
+        "current_page": prog.current_page,
+        "total_pages": prog.total_pages,
+        "percent": prog.percent,
+        "message": prog.message,
+        "candidates_count": prog.candidates_count,
+        "failed_pages": prog.failed_pages,
+        "error": prog.error,
+    }
 
 
 @router.get("/{document_id}/status")
@@ -234,10 +295,17 @@ async def detect_watermarks(document_id: str) -> DetectionResponse:
     if record is None:
         raise _api_error(404, "DOCUMENT_NOT_FOUND", "No document was found with that ID.")
 
+    progress_store.update(document_id, stage="detecting", message="Detecting watermark patterns...")
     analysis = _get_or_run_analysis(document_id, record)
     candidates = generate_candidates(analysis)
     detection_store.set(document_id, candidates)
     document_store.set_status(document_id, "detected")
+    progress_store.update(
+        document_id,
+        stage="detected",
+        candidates_count=len(candidates),
+        message=f"Detection complete: {len(candidates)} watermark pattern(s) identified",
+    )
 
     logger.info("detect_success job_id=%s candidate_count=%s", document_id, len(candidates))
 
@@ -281,14 +349,37 @@ async def process_document(document_id: str, request: ProcessRequest) -> Process
     source_path = _current_source_path(record)
     is_ppt = _is_pptx(record)
 
+    document_store.set_status(document_id, "processing")
+    progress_store.update(
+        document_id,
+        stage="processing",
+        current_page=0,
+        total_pages=record.page_count or 0,
+        message="Starting watermark removal...",
+    )
+
+    def on_proc_progress(current: int, total: int, msg: str) -> None:
+        progress_store.update(
+            document_id,
+            stage="processing",
+            current_page=current,
+            total_pages=total,
+            message=msg,
+        )
+
     try:
         if is_ppt:
-            cleaned_bytes, pages_affected, skipped_ids = remove_pptx_watermarks(source_path, selected, pages_filter)
+            cleaned_bytes, pages_affected, skipped_ids = remove_pptx_watermarks(
+                source_path, selected, pages_filter, progress_callback=on_proc_progress
+            )
             result_path = settings.result_path / f"{document_id}.pptx"
         else:
-            cleaned_bytes, pages_affected, skipped_ids = remove_candidates(source_path, selected, pages_filter)
+            cleaned_bytes, pages_affected, skipped_ids = remove_candidates(
+                source_path, selected, pages_filter, progress_callback=on_proc_progress
+            )
             result_path = settings.result_path / f"{document_id}.pdf"
     except (RemovalError, ImageRemovalError, PptxProcessingError) as exc:
+        progress_store.update(document_id, stage="error", error=exc.message, message=exc.message)
         raise _api_error(400, exc.code, exc.message) from exc
 
     try:
@@ -303,6 +394,14 @@ async def process_document(document_id: str, request: ProcessRequest) -> Process
 
     all_skipped = sorted(set(skipped_ids) | set(unknown_ids))
     removed_count = len(request.candidate_ids) - len(all_skipped)
+
+    progress_store.update(
+        document_id,
+        stage="processed",
+        current_page=record.page_count or 0,
+        total_pages=record.page_count or 0,
+        message=f"Processing complete: {len(pages_affected)} page(s) cleaned",
+    )
 
     logger.info(
         "process_success job_id=%s requested=%s removed=%s pages_affected=%s",
@@ -421,17 +520,40 @@ async def manual_remove(document_id: str, request: ManualRemovalRequest) -> Manu
 
     source_path = _current_source_path(record)
 
+    document_store.set_status(document_id, "processing")
+    progress_store.update(
+        document_id,
+        stage="processing",
+        current_page=0,
+        total_pages=record.page_count or 0,
+        message="Applying intelligent manual removal...",
+    )
+
     try:
         fresh_analysis = analyze_document(document_id, source_path)
     except AnalysisError as exc:
         raise _api_error(400, exc.code, exc.message) from exc
     scanned_pages = scanned_page_xrefs(fresh_analysis)
 
+    def on_manual_progress(current: int, total: int, msg: str) -> None:
+        progress_store.update(
+            document_id,
+            stage="processing",
+            current_page=current,
+            total_pages=total,
+            message=msg,
+        )
+
     try:
         cleaned_bytes, pages_affected = remove_manual_regions(
-            source_path, request.regions, request.apply_to_all_pages, scanned_pages
+            source_path,
+            request.regions,
+            request.apply_to_all_pages,
+            scanned_pages,
+            progress_callback=on_manual_progress,
         )
     except ManualRemovalError as exc:
+        progress_store.update(document_id, stage="error", error=exc.message, message=exc.message)
         raise _api_error(400, exc.code, exc.message) from exc
 
     result_path = settings.result_path / f"{document_id}.pdf"
@@ -444,6 +566,13 @@ async def manual_remove(document_id: str, request: ManualRemovalRequest) -> Manu
     document_store.set_result_path(document_id, str(result_path))
     document_store.set_status(document_id, "processed")
     analysis_store.delete(document_id)
+    progress_store.update(
+        document_id,
+        stage="processed",
+        current_page=record.page_count or 0,
+        total_pages=record.page_count or 0,
+        message=f"Manual removal complete: {len(pages_affected)} page(s) cleaned",
+    )
 
     logger.info(
         "manual_remove_success job_id=%s regions=%s pages_affected=%s",
@@ -511,5 +640,6 @@ async def delete_document_route(document_id: str) -> dict:
         raise _api_error(404, "DOCUMENT_NOT_FOUND", "No document was found with that ID.")
 
     delete_document(record)
+    progress_store.delete(document_id)
 
     return {"success": True, "document_id": document_id, "status": "deleted"}

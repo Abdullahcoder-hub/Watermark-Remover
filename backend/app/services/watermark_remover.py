@@ -1,12 +1,15 @@
 """
-Combined text + image watermark removal (Phase 3 Case A + Phase 4 Case B together).
+Combined text + image watermark removal.
 
 Uses surgical PDF content stream text removal to preserve 100% of body paragraphs,
 headers, and surrounding text without clipping or slicing through overlapping lines.
+Includes bounded memory management and progress reporting for large documents.
 """
 from __future__ import annotations
 
+import gc
 from pathlib import Path
+from typing import Callable
 
 import fitz  # PyMuPDF
 
@@ -24,6 +27,7 @@ def remove_candidates(
     source: Path | bytes,
     candidates: list[WatermarkCandidate],
     pages_filter: set[int] | None,
+    progress_callback: Callable[[int, int, str], None] | None = None,
 ) -> tuple[bytes, list[int], list[str]]:
     """
     Remove a mixed list of text and/or image watermark candidates from
@@ -48,7 +52,15 @@ def remove_candidates(
             if pdf.needs_pass:
                 raise RemovalError("PASSWORD_PROTECTED", "This PDF is password-protected and cannot be processed.")
 
-            for page_number, page_candidates in candidates_by_page.items():
+            total_pages = pdf.page_count
+            for page_idx, (page_number, page_candidates) in enumerate(candidates_by_page.items()):
+                if progress_callback is not None:
+                    progress_callback(
+                        page_idx + 1,
+                        len(candidates_by_page),
+                        f"Removing watermarks — page {page_number} of {total_pages}",
+                    )
+
                 if page_number < 1 or page_number > pdf.page_count:
                     skipped_candidate_ids.extend(c.candidate_id for c in page_candidates)
                     continue
@@ -61,7 +73,7 @@ def remove_candidates(
                 text_words = [c.text for c in text_candidates]
                 stream_modified = clean_page_text_streams(pdf, page, text_words)
 
-                # 2. For any text watermark not removed via stream, fallback to tight redaction
+                # 2. For any text watermark not removed via stream, fallback to tight quad redaction
                 remaining_text = []
                 for c in text_candidates:
                     if c.text in page.get_text():
@@ -102,6 +114,9 @@ def remove_candidates(
 
                 if stream_modified or has_text_redact or has_image_redact:
                     pages_affected.append(page_number)
+
+                if (page_idx + 1) % 5 == 0:
+                    gc.collect()
 
             cleaned_bytes = pdf.tobytes(garbage=4, deflate=True)
     except (RemovalError, ImageRemovalError):

@@ -50,6 +50,7 @@ def delete_document(record: DocumentRecord) -> None:
     analysis_store.delete(record.document_id)
     detection_store.delete(record.document_id)
     preview_cache.delete_document(record.document_id)
+    progress_store.delete(record.document_id)
     document_store.delete(record.document_id)
     logger.info("cleanup_deleted job_id=%s", record.document_id)
 
