@@ -116,3 +116,29 @@ export interface OcrResponse {
   already_applied: boolean;
 }
 
+// ─── Image Watermark Detection ───────────────────────────────────────────────
+
+export interface ImageBoundingBox {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface ImageDetectionResult {
+  detection_id: string;
+  type: "text" | "logo" | "overlay" | "pattern" | "transparent_overlay";
+  label: string;
+  confidence: number;
+  bbox: ImageBoundingBox;
+  reasons: string[];
+}
+
+export interface ImageDetectionResponse {
+  success: true;
+  detection_count: number;
+  detections: ImageDetectionResult[];
+  image_width: number;
+  image_height: number;
+  message: string;
+}

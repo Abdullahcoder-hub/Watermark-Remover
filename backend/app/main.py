@@ -14,7 +14,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from app.api import documents, health
+from app.api import documents, health, images
 from app.config import settings
 from app.services.cleanup_service import cleanup_expired_documents
 
@@ -68,6 +68,7 @@ app.add_middleware(
 
 app.include_router(health.router)
 app.include_router(documents.router)
+app.include_router(images.router)
 
 
 @app.exception_handler(Exception)

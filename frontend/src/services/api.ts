@@ -5,6 +5,7 @@ import type {
   DetectionResponse,
   DocumentAnalysisResponse,
   DocumentUploadResponse,
+  ImageDetectionResponse,
   ManualRegion,
   ManualRemovalResponse,
   OcrResponse,
@@ -158,6 +159,78 @@ export async function runOcr(documentId: string): Promise<OcrResponse> {
       { timeout: 300_000 },
     );
     return response.data;
+  } catch (error) {
+    throw toApiRequestError(error);
+  }
+}
+
+// ─── Image Watermark Detection / Removal ─────────────────────────────────────
+
+export async function detectImageWatermark(
+  file: File,
+  onProgress?: (percent: number) => void,
+): Promise<ImageDetectionResponse> {
+  const formData = new FormData();
+  formData.append("file", file);
+
+  try {
+    const response = await apiClient.post<ImageDetectionResponse>(
+      "/api/v1/images/detect-watermark",
+      formData,
+      {
+        headers: { "Content-Type": "multipart/form-data" },
+        onUploadProgress: (event) => {
+          if (onProgress && event.total) {
+            onProgress(Math.round((event.loaded / event.total) * 100));
+          }
+        },
+      },
+    );
+    return response.data;
+  } catch (error) {
+    throw toApiRequestError(error);
+  }
+}
+
+export async function removeImageWatermark(
+  file: File,
+  bboxes: Array<{ x: number; y: number; width: number; height: number }>,
+  onProgress?: (percent: number) => void,
+): Promise<Blob> {
+  const formData = new FormData();
+  formData.append("file", file);
+  formData.append("regions", JSON.stringify(bboxes));
+
+  try {
+    const response = await apiClient.post("/api/v1/images/remove-watermark", formData, {
+      headers: { "Content-Type": "multipart/form-data" },
+      responseType: "blob",
+      onUploadProgress: (event) => {
+        if (onProgress && event.total) {
+          onProgress(Math.round((event.loaded / event.total) * 100));
+        }
+      },
+    });
+    return response.data as Blob;
+  } catch (error) {
+    throw toApiRequestError(error);
+  }
+}
+
+export async function previewImageDetections(
+  file: File,
+  detections: object[],
+): Promise<string> {
+  const formData = new FormData();
+  formData.append("file", file);
+  formData.append("detections", JSON.stringify(detections));
+
+  try {
+    const response = await apiClient.post("/api/v1/images/preview", formData, {
+      headers: { "Content-Type": "multipart/form-data" },
+      responseType: "blob",
+    });
+    return URL.createObjectURL(response.data as Blob);
   } catch (error) {
     throw toApiRequestError(error);
   }
