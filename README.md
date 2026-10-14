@@ -74,6 +74,7 @@ Open PowerShell in the project root (`document-cleaner\`).
 cd backend
 python -m venv venv
 venv\Scripts\activate
+python -m pip install -r requirements.txt
 pip install -r requirements.txt
 copy ..\.env.example ..\.env
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000

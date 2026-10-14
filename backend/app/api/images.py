@@ -49,6 +49,7 @@ from app.services.image_watermark_detector import detect_watermarks_in_image
 logger = logging.getLogger("document_cleaner")
 
 router = APIRouter(prefix="/api/v1/images", tags=["images"])
+root_api_router = APIRouter(prefix="/api", tags=["clean-api"])
 
 # ---------------------------------------------------------------------------
 # Allowed image MIME types and magic byte signatures
@@ -190,6 +191,7 @@ def _get_image_dimensions(image_bytes: bytes) -> tuple[int, int]:
 # ---------------------------------------------------------------------------
 
 @router.post("/detect-watermark", response_model=ImageDetectionResponse)
+@root_api_router.post("/detect-watermark", response_model=ImageDetectionResponse)
 async def detect_image_watermark(
     file: UploadFile = File(...),
 ) -> ImageDetectionResponse:
@@ -273,6 +275,7 @@ async def detect_image_watermark(
 
 
 @router.post("/remove-watermark")
+@root_api_router.post("/remove-watermark")
 async def remove_image_watermark(
     file: UploadFile = File(...),
     regions: str = Form(...),   # JSON string: [{x,y,width,height}, ...]

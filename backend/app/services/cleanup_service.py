@@ -25,6 +25,7 @@ from app.utils.document_store import (
     detection_store,
     document_store,
     preview_cache,
+    progress_store,
     utcnow,
 )
 

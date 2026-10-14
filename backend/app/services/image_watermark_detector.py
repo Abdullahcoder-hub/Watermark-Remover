@@ -167,6 +167,15 @@ class ImageWatermarkDetector:
             logger.warning("image_watermark_corner_detection_failed: %s", exc)
 
         # ---------------------------------------------------------------
+        # SIGNAL E: OpenCV text / logo stroke region detection
+        # ---------------------------------------------------------------
+        try:
+            stroke_detections = self._detect_text_stroke_regions(image, gray, w, h)
+            all_detections.extend(stroke_detections)
+        except Exception as exc:
+            logger.warning("image_watermark_stroke_detection_failed: %s", exc)
+
+        # ---------------------------------------------------------------
         # Post-processing: merge overlapping, remove face overlaps, sort
         # ---------------------------------------------------------------
         merged = self._merge_overlapping(all_detections, w, h)
@@ -642,22 +651,25 @@ class ImageWatermarkDetector:
                 center_mean = np.mean(center_roi, axis=(0, 1))
                 color_diff = float(np.linalg.norm(corner_mean - center_mean))
 
-                # Higher contrast = more likely to be a separate overlay element
-                score = 0.0
-                reasons: list[str] = []
+                # Adaptive scoring based on edge density and color contrast
+                score = 0.15
+                reasons: list[str] = [f"located in {corner_name} corner (common watermark position)"]
 
-                if edge_density > 0.05:
+                if edge_density > 0.035:
                     score += 0.25
                     reasons.append(f"high edge density ({edge_density:.1%}) in {corner_name}")
+                elif edge_density > 0.015:
+                    score += 0.15
+                    reasons.append(f"edge content ({edge_density:.1%}) in {corner_name}")
 
-                if color_diff > 30:
+                if color_diff > 25:
                     score += 0.20
                     reasons.append(f"distinct color from image center (diff={color_diff:.0f})")
+                elif color_diff > 12:
+                    score += 0.10
+                    reasons.append(f"slight color shift from image center (diff={color_diff:.0f})")
 
-                score += 0.15
-                reasons.append(f"located in {corner_name} corner (common watermark position)")
-
-                if score >= 0.40:
+                if score >= 0.35:
                     # Absolute pixel coords
                     abs_x = cx + int(ex_min)
                     abs_y = cy + int(ey_min)
@@ -682,6 +694,112 @@ class ImageWatermarkDetector:
                     )
             except Exception:
                 continue
+
+        return detections
+
+    # ------------------------------------------------------------------
+    # SIGNAL E: OpenCV-based text & overlay region detection (MSER & Gradient)
+    # ------------------------------------------------------------------
+
+    def _detect_text_stroke_regions(
+        self, image: np.ndarray, gray: np.ndarray, img_w: int, img_h: int
+    ) -> list[ImageWatermarkDetection]:
+        """
+        Detect text blocks, logos and overlay stamps using horizontal gradient grouping
+        and MSER. Runs completely locally on CPU with OpenCV — independent of external OCR engines.
+        """
+        detections: list[ImageWatermarkDetection] = []
+
+        try:
+            # Multi-scale analysis: base resolution and small-watermark upscale if image is small
+            scales = [1.0]
+            if min(img_w, img_h) < 1200:
+                scales.append(1.5)
+
+            for scale in scales:
+                curr_gray = gray if scale == 1.0 else cv2.resize(gray, (int(img_w * scale), int(img_h * scale)), interpolation=cv2.INTER_LINEAR)
+                ch, cw = curr_gray.shape[:2]
+
+                # Sobel horizontal gradient to identify character strokes
+                grad_x = cv2.Sobel(curr_gray, cv2.CV_32F, 1, 0, ksize=3)
+                abs_grad_x = cv2.convertScaleAbs(grad_x)
+                _, thresh = cv2.threshold(abs_grad_x, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+                # Horizontal morphological close connects characters into words/blocks
+                kernel_w = max(15, int(25 * (scale / 1.0)))
+                kernel_h = max(3, int(6 * (scale / 1.0)))
+                kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_w, kernel_h))
+                closed = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
+
+                contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                for cnt in contours:
+                    cx, cy, cbw, cbh = cv2.boundingRect(cnt)
+                    # Convert back to original scale
+                    x = int(cx / scale)
+                    y = int(cy / scale)
+                    bw = int(cbw / scale)
+                    bh = int(cbh / scale)
+
+                    if bw < 12 or bh < 8:
+                        continue
+
+                    area_frac = (bw * bh) / float(img_w * img_h)
+                    aspect = bw / float(bh)
+
+                    # Text overlays typically have aspect > 1.2 and area < 25% of image
+                    if not (1.1 < aspect < 25.0 and 0.0005 < area_frac < 0.25):
+                        continue
+
+                    # Verify internal edge density
+                    roi_gray = gray[y:y + bh, x:x + bw]
+                    if roi_gray.size == 0:
+                        continue
+
+                    roi_edges = cv2.Canny(roi_gray, 40, 120)
+                    roi_edge_density = float(np.sum(roi_edges > 0)) / float(bw * bh)
+                    if roi_edge_density < 0.02:
+                        continue
+
+                    score = 0.20
+                    reasons: list[str] = ["detected text/logo overlay structure"]
+
+                    if self._is_corner(x, y, bw, bh, img_w, img_h):
+                        score += 0.35
+                        reasons.append("located in corner watermark zone")
+                    elif self._is_center(x, y, bw, bh, img_w, img_h):
+                        score += 0.25
+                        reasons.append("positioned in center stamp zone")
+
+                    # Semi-transparent or low-contrast text check
+                    mean_val = float(np.mean(roi_gray))
+                    if 120 < mean_val < 220:
+                        score += 0.15
+                        reasons.append("translucent watermark tone")
+
+                    # Border vs center gradient check (overlay boundary)
+                    border_pad = 2
+                    x0_p = max(0, x - border_pad)
+                    y0_p = max(0, y - border_pad)
+                    x1_p = min(img_w, x + bw + border_pad)
+                    y1_p = min(img_h, y + bh + border_pad)
+                    surround = gray[y0_p:y1_p, x0_p:x1_p]
+                    if surround.size > roi_gray.size:
+                        surround_std = float(np.std(surround))
+                        if surround_std > 10:
+                            score += 0.10
+
+                    if score >= 0.40:
+                        detections.append(
+                            ImageWatermarkDetection(
+                                type="text",
+                                label="Text / Logo overlay",
+                                confidence=min(0.88, round(score, 2)),
+                                bbox={"x": x, "y": y, "width": bw, "height": bh},
+                                reasons=reasons,
+                            )
+                        )
+        except Exception as exc:
+            logger.debug("text_stroke_region_detection_error: %s", exc)
 
         return detections
 

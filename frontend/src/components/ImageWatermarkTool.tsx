@@ -2,16 +2,14 @@
  * ImageWatermarkTool — the complete image watermark detection + removal UI.
  *
  * Stages:
- *   idle      → show upload area (already handled by parent, this receives a File)
  *   detecting → spinner "AI is analyzing…"
- *   detected  → annotated preview + candidate list + action buttons
+ *   detected  → annotated preview + candidate list + mask editor
  *   removing  → spinner "Removing watermarks…"
  *   done      → before/after view + download button
  *   error     → error message + retry button
  */
 import {
   AlertCircle,
-  Check,
   CheckSquare,
   Download,
   Eraser,
@@ -34,8 +32,7 @@ interface ImageWatermarkToolProps {
   onReset: () => void;
 }
 
-// ─── Confidence helpers ───────────────────────────────────────────────────────
-
+// ─── Confidence badge ────────────────────────────────────────────────────────
 function confidenceBadge(conf: number): { text: string; cls: string } {
   if (conf >= 0.70) return { text: `${Math.round(conf * 100)}% — High`, cls: "bg-emerald-100 text-emerald-800 border-emerald-200" };
   if (conf >= 0.40) return { text: `${Math.round(conf * 100)}% — Medium`, cls: "bg-amber-100 text-amber-800 border-amber-200" };
@@ -44,27 +41,26 @@ function confidenceBadge(conf: number): { text: string; cls: string } {
 
 function typeLabel(type: string): string {
   return (
-    {
+    ({
       text: "Text",
       logo: "Logo",
       overlay: "Overlay",
       pattern: "Pattern",
       transparent_overlay: "Transparent",
-    }[type] ?? type
+    } as Record<string, string>)[type] ?? type
   );
 }
 
-// ─── Manual bbox draw overlay ─────────────────────────────────────────────────
-
+// ─── Manual bbox draw canvas ─────────────────────────────────────────────────
 interface ManualBboxDrawProps {
   imageUrl: string;
   imageW: number;
   imageH: number;
   onAddBbox: (bbox: { x: number; y: number; width: number; height: number }) => void;
-  existingBboxes: Array<{ id: string; x: number; y: number; width: number; height: number }>;
+  manualEntries: Array<{ id: string; x: number; y: number; width: number; height: number }>;
   aiDetections: ImageDetectionResult[];
   selectedIds: Set<string>;
-  onRemoveId: (id: string) => void;
+  onRemoveManual: (id: string) => void;
 }
 
 function ManualBboxDraw({
@@ -72,12 +68,13 @@ function ManualBboxDraw({
   imageW,
   imageH,
   onAddBbox,
-  existingBboxes,
+  manualEntries,
   aiDetections,
   selectedIds,
-  onRemoveId,
+  onRemoveManual,
 }: ManualBboxDrawProps) {
   const containerRef = useRef<HTMLDivElement>(null);
+  const imgRef = useRef<HTMLImageElement>(null);
   const [dragStart, setDragStart] = useState<{ x: number; y: number } | null>(null);
   const [dragCurr, setDragCurr] = useState<{ x: number; y: number } | null>(null);
   const [loaded, setLoaded] = useState(false);
@@ -86,7 +83,7 @@ function ManualBboxDraw({
     if (!dragStart) return;
 
     const getPoint = (cx: number, cy: number) => {
-      const rect = containerRef.current?.getBoundingClientRect();
+      const rect = imgRef.current?.getBoundingClientRect();
       if (!rect || rect.width === 0 || rect.height === 0) return null;
       return {
         x: Math.min(Math.max((cx - rect.left) / rect.width, 0), 1),
@@ -128,7 +125,7 @@ function ManualBboxDraw({
 
   const handleMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
     if (!loaded) return;
-    const rect = containerRef.current?.getBoundingClientRect();
+    const rect = imgRef.current?.getBoundingClientRect();
     if (!rect) return;
     setDragStart({
       x: Math.max(0, Math.min((e.clientX - rect.left) / rect.width, 1)),
@@ -148,70 +145,152 @@ function ManualBboxDraw({
       : null;
 
   return (
-    <div
-      ref={containerRef}
-      className="relative w-full cursor-crosshair select-none overflow-hidden rounded-xl border border-slate-200 bg-slate-50"
-      style={{ maxHeight: "60vh" }}
-      onMouseDown={handleMouseDown}
-    >
-      {!loaded && (
-        <div className="flex h-48 items-center justify-center">
-          <Loader2 className="h-6 w-6 animate-spin text-slate-400" />
-        </div>
-      )}
-      <div className={`relative inline-block w-full ${loaded ? "" : "hidden"}`}>
-        <img
-          src={imageUrl}
-          alt="Image preview"
-          className="block w-full"
-          draggable={false}
-          onLoad={() => setLoaded(true)}
-        />
+    <div className="space-y-3">
+      <div
+        ref={containerRef}
+        className="relative w-full cursor-crosshair select-none overflow-hidden rounded-xl border border-slate-200 bg-slate-50"
+        style={{ maxHeight: "60vh" }}
+        onMouseDown={handleMouseDown}
+      >
+        {!loaded && (
+          <div className="flex h-48 items-center justify-center">
+            <Loader2 className="h-6 w-6 animate-spin text-slate-400" />
+          </div>
+        )}
+        <div className={`relative inline-block w-full ${loaded ? "" : "hidden"}`}>
+          <img
+            ref={imgRef}
+            src={imageUrl}
+            alt="Image to edit"
+            className="block w-full"
+            draggable={false}
+            onLoad={() => setLoaded(true)}
+          />
 
-        {/* AI detection overlays */}
-        {aiDetections
-          .filter((d) => selectedIds.has(d.detection_id))
-          .map((d) => (
+          {/* AI detection overlays (blue) */}
+          {aiDetections
+            .filter((d) => selectedIds.has(d.detection_id))
+            .map((d) => (
+              <div
+                key={d.detection_id}
+                className="absolute border-2 border-blue-500 bg-blue-500/10"
+                style={{
+                  left: `${(d.bbox.x / imageW) * 100}%`,
+                  top: `${(d.bbox.y / imageH) * 100}%`,
+                  width: `${(d.bbox.width / imageW) * 100}%`,
+                  height: `${(d.bbox.height / imageH) * 100}%`,
+                }}
+              />
+            ))}
+
+          {/* Manual bbox overlays (amber) */}
+          {manualEntries
+            .filter((b) => selectedIds.has(b.id))
+            .map((b) => (
+              <div
+                key={b.id}
+                className="absolute border-2 border-amber-500 bg-amber-500/10"
+                style={{
+                  left: `${(b.x / imageW) * 100}%`,
+                  top: `${(b.y / imageH) * 100}%`,
+                  width: `${(b.width / imageW) * 100}%`,
+                  height: `${(b.height / imageH) * 100}%`,
+                }}
+              />
+            ))}
+
+          {/* Active drag rect */}
+          {dragRect && (
             <div
-              key={d.detection_id}
-              className="absolute border-2 border-blue-500 bg-blue-500/10"
+              className="pointer-events-none absolute border-2 border-dashed border-amber-400 bg-amber-400/10"
               style={{
-                left: `${(d.bbox.x / imageW) * 100}%`,
-                top: `${(d.bbox.y / imageH) * 100}%`,
-                width: `${(d.bbox.width / imageW) * 100}%`,
-                height: `${(d.bbox.height / imageH) * 100}%`,
+                left: `${dragRect.x0 * 100}%`,
+                top: `${dragRect.y0 * 100}%`,
+                width: `${(dragRect.x1 - dragRect.x0) * 100}%`,
+                height: `${(dragRect.y1 - dragRect.y0) * 100}%`,
               }}
             />
-          ))}
+          )}
+        </div>
+      </div>
 
-        {/* Manual bbox overlays */}
-        {existingBboxes
-          .filter((b) => selectedIds.has(b.id))
-          .map((b) => (
+      {/* Manual entries list */}
+      {manualEntries.length > 0 && (
+        <div className="space-y-1.5">
+          {manualEntries.map((b) => (
             <div
               key={b.id}
-              className="absolute border-2 border-amber-500 bg-amber-500/10"
-              style={{
-                left: `${(b.x / imageW) * 100}%`,
-                top: `${(b.y / imageH) * 100}%`,
-                width: `${(b.width / imageW) * 100}%`,
-                height: `${(b.height / imageH) * 100}%`,
-              }}
-            />
+              className="flex items-center justify-between rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs"
+            >
+              <span className="text-amber-800 font-medium">
+                Manual: {b.width}×{b.height}px at ({b.x}, {b.y})
+              </span>
+              <button
+                type="button"
+                onClick={() => onRemoveManual(b.id)}
+                className="ml-2 text-amber-600 hover:text-amber-800"
+                aria-label="Remove this selection"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </div>
           ))}
+        </div>
+      )}
+    </div>
+  );
+}
 
-        {/* Active drag rect */}
-        {dragRect && (
-          <div
-            className="pointer-events-none absolute border-2 border-dashed border-amber-400 bg-amber-400/10"
-            style={{
-              left: `${dragRect.x0 * 100}%`,
-              top: `${dragRect.y0 * 100}%`,
-              width: `${(dragRect.x1 - dragRect.x0) * 100}%`,
-              height: `${(dragRect.y1 - dragRect.y0) * 100}%`,
-            }}
-          />
-        )}
+// ─── Detection group ─────────────────────────────────────────────────────────
+interface DetectionGroupProps {
+  title: string;
+  detections: ImageDetectionResult[];
+  selectedIds: Set<string>;
+  onToggle: (id: string) => void;
+  disabled: boolean;
+}
+
+function DetectionGroup({ title, detections, selectedIds, onToggle, disabled }: DetectionGroupProps) {
+  return (
+    <div>
+      <p className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-slate-500">{title}</p>
+      <div className="space-y-2">
+        {detections.map((det) => {
+          const badge = confidenceBadge(det.confidence);
+          const selected = selectedIds.has(det.detection_id);
+          return (
+            <label
+              key={det.detection_id}
+              className={`flex cursor-pointer items-start gap-3 rounded-xl border p-3 transition-colors ${
+                selected
+                  ? "border-brand-300 bg-brand-50/60"
+                  : "border-slate-200 bg-white hover:border-brand-200"
+              } ${disabled ? "pointer-events-none opacity-60" : ""}`}
+            >
+              <input
+                type="checkbox"
+                checked={selected}
+                onChange={() => onToggle(det.detection_id)}
+                className="mt-0.5 h-4 w-4 rounded border-slate-300 text-brand-600 focus:ring-brand-500"
+                disabled={disabled}
+              />
+              <div className="min-w-0 flex-1">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <p className="truncate max-w-[200px] font-medium text-slate-800 text-sm">
+                    {typeLabel(det.type)}: {det.label.length > 30 ? `${det.label.slice(0, 30)}…` : det.label}
+                  </p>
+                  <span className={`shrink-0 rounded-full border px-2 py-0.5 text-xs font-semibold ${badge.cls}`}>
+                    {badge.text}
+                  </span>
+                </div>
+                <p className="mt-0.5 text-xs text-slate-500">
+                  {det.bbox.width}×{det.bbox.height}px at ({det.bbox.x},{det.bbox.y})
+                  {det.reasons.length > 0 && ` · ${det.reasons.slice(0, 2).join(", ")}`}
+                </p>
+              </div>
+            </label>
+          );
+        })}
       </div>
     </div>
   );
@@ -242,66 +321,78 @@ export function ImageWatermarkTool({ file, onReset }: ImageWatermarkToolProps) {
   } = useImageWatermark();
 
   const [showMaskEditor, setShowMaskEditor] = useState(false);
-  const [manualBboxes, setManualBboxes] = useState<
+  // Local tracking of manual entries so we can show them in UI
+  const [manualEntries, setManualEntries] = useState<
     Array<{ id: string; x: number; y: number; width: number; height: number }>
   >([]);
 
-  // Auto-start detection on mount
+  // Auto-start detection on mount / when file changes
   useEffect(() => {
     startWithFile(file);
-  }, [file, startWithFile]);
+    setManualEntries([]);
+    setShowMaskEditor(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [file]);
 
-  const handleReset = () => {
+  const handleFullReset = () => {
     reset();
     onReset();
   };
 
   const handleAddBbox = (bbox: { x: number; y: number; width: number; height: number }) => {
-    const id = `manual_${Date.now()}`;
-    const entry = { id, ...bbox };
-    setManualBboxes((prev) => [...prev, entry]);
-    addManualBbox(bbox);
+    const id = addManualBbox(bbox);  // hook now returns the generated id
+    setManualEntries((prev) => [...prev, { id, ...bbox }]);
   };
 
   const handleRemoveBbox = (id: string) => {
-    setManualBboxes((prev) => prev.filter((b) => b.id !== id));
+    setManualEntries((prev) => prev.filter((b) => b.id !== id));
     removeById(id);
   };
 
   const imageW = detection?.image_width ?? 1;
   const imageH = detection?.image_height ?? 1;
+  const detections = detection?.detections ?? [];
+  const isRemoving = stage === "removing";
 
-  // Download helper
+  // Download cleaned image
   const handleDownload = () => {
     if (!resultBlob) return;
     const url = URL.createObjectURL(resultBlob);
     const a = document.createElement("a");
     a.href = url;
-    const ext = file.name.split(".").pop() || "jpg";
-    a.download = `cleaned_${file.name.replace(/\.[^.]+$/, "")}.${ext}`;
+    const stem = file.name.replace(/\.[^.]+$/, "");
+    const ext = file.name.split(".").pop() ?? "jpg";
+    a.download = `cleaned_${stem}.${ext}`;
+    document.body.appendChild(a);
     a.click();
+    document.body.removeChild(a);
     URL.revokeObjectURL(url);
   };
 
-  // ─── Detecting stage ────────────────────────────────────────────────────
+  // ─── Stage: detecting ───────────────────────────────────────────────────
   if (stage === "detecting") {
     return (
       <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
         <div className="flex items-center gap-3 text-sm font-medium text-brand-700">
           <Loader2 className="h-5 w-5 animate-spin" />
           <span>
-            AI is analyzing your image for watermarks…{" "}
-            {uploadProgress > 0 && uploadProgress < 100 ? `(${uploadProgress}% uploaded)` : ""}
+            AI is analyzing your image for watermarks
+            {uploadProgress > 0 && uploadProgress < 100 ? ` (${uploadProgress}% uploaded)` : "…"}
           </span>
         </div>
         <div className="mt-3 text-xs text-slate-500">
           Checking for text, logos, transparent overlays, corner badges and repeating patterns.
         </div>
+        {previewUrl && (
+          <div className="mt-4 overflow-hidden rounded-xl border border-slate-100">
+            <img src={previewUrl} alt="Uploaded image" className="block w-full max-h-48 object-contain bg-slate-50" />
+          </div>
+        )}
       </div>
     );
   }
 
-  // ─── Error stage ─────────────────────────────────────────────────────────
+  // ─── Stage: error ────────────────────────────────────────────────────────
   if (stage === "error") {
     return (
       <div className="rounded-2xl border border-red-200 bg-red-50/70 p-6 text-center shadow-sm">
@@ -319,7 +410,7 @@ export function ImageWatermarkTool({ file, onReset }: ImageWatermarkToolProps) {
           </button>
           <button
             type="button"
-            onClick={handleReset}
+            onClick={handleFullReset}
             className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 transition-all"
           >
             <RotateCcw className="h-4 w-4" />
@@ -330,15 +421,13 @@ export function ImageWatermarkTool({ file, onReset }: ImageWatermarkToolProps) {
     );
   }
 
-  // ─── Done stage ───────────────────────────────────────────────────────────
+  // ─── Stage: done ─────────────────────────────────────────────────────────
   if (stage === "done" && resultUrl) {
     return (
       <div className="space-y-6">
         <div className="rounded-2xl border border-emerald-200 bg-emerald-50/70 p-5">
           <p className="font-bold text-emerald-900">✓ Watermark Removed Successfully!</p>
-          <p className="mt-1 text-sm text-emerald-700">
-            Your image has been cleaned. Click below to download.
-          </p>
+          <p className="mt-1 text-sm text-emerald-700">Your image has been cleaned. Compare below and download.</p>
         </div>
 
         {/* Before / After */}
@@ -372,7 +461,7 @@ export function ImageWatermarkTool({ file, onReset }: ImageWatermarkToolProps) {
           </button>
           <button
             type="button"
-            onClick={() => { reset(); startWithFile(file); }}
+            onClick={() => { reset(); startWithFile(file); setManualEntries([]); }}
             className="inline-flex items-center gap-2 rounded-2xl border border-slate-200 bg-white px-5 py-3 text-sm font-semibold text-slate-700 hover:bg-slate-50 transition-all"
           >
             <ScanSearch className="h-4 w-4" />
@@ -380,7 +469,7 @@ export function ImageWatermarkTool({ file, onReset }: ImageWatermarkToolProps) {
           </button>
           <button
             type="button"
-            onClick={handleReset}
+            onClick={handleFullReset}
             className="inline-flex items-center gap-2 rounded-2xl border border-slate-200 bg-white px-5 py-3 text-sm font-semibold text-slate-700 hover:bg-slate-50 transition-all"
           >
             <RotateCcw className="h-4 w-4" />
@@ -391,16 +480,14 @@ export function ImageWatermarkTool({ file, onReset }: ImageWatermarkToolProps) {
     );
   }
 
-  // ─── Detected / Removing stages ───────────────────────────────────────────
-  const isRemoving = stage === "removing";
-  const detections = detection?.detections ?? [];
+  // ─── Stage: detected / removing ──────────────────────────────────────────
   const highConf = detections.filter((d) => d.confidence >= 0.70);
   const medConf  = detections.filter((d) => d.confidence >= 0.40 && d.confidence < 0.70);
   const lowConf  = detections.filter((d) => d.confidence < 0.40);
 
   return (
     <div className="space-y-5">
-      {/* Detection status header */}
+      {/* Header */}
       <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
@@ -411,8 +498,7 @@ export function ImageWatermarkTool({ file, onReset }: ImageWatermarkToolProps) {
             </p>
             <p className="mt-0.5 text-sm text-slate-500">{detection?.message}</p>
             <p className="mt-0.5 text-xs text-slate-400">
-              {file.name} • {formatFileSize(file.size)} •{" "}
-              {imageW}×{imageH}px
+              {file.name} · {formatFileSize(file.size)} · {imageW}×{imageH}px
             </p>
           </div>
           <div className="flex flex-wrap gap-2">
@@ -427,24 +513,25 @@ export function ImageWatermarkTool({ file, onReset }: ImageWatermarkToolProps) {
             </button>
             <button
               type="button"
-              onClick={handleReset}
+              onClick={handleFullReset}
               disabled={isRemoving}
               className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-100 transition-all disabled:opacity-50"
             >
               <RotateCcw className="h-3.5 w-3.5" />
-              Upload New
+              New Image
             </button>
           </div>
         </div>
       </div>
 
+      {/* Two-column layout: preview + candidates */}
       <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
-        {/* Left: Preview */}
+        {/* Preview */}
         <div>
           <p className="mb-2 text-sm font-semibold text-slate-700">
             {annotatedPreviewUrl ? "AI Detection Preview" : "Image Preview"}
           </p>
-          <div className="overflow-hidden rounded-xl border border-slate-200 shadow-sm">
+          <div className="overflow-hidden rounded-xl border border-slate-200 shadow-sm bg-slate-50">
             <img
               src={annotatedPreviewUrl ?? previewUrl ?? ""}
               alt="Detection preview"
@@ -452,123 +539,69 @@ export function ImageWatermarkTool({ file, onReset }: ImageWatermarkToolProps) {
             />
           </div>
           {annotatedPreviewUrl && (
-            <p className="mt-1.5 text-xs text-slate-400">
-              Colored boxes show detected watermark regions
-            </p>
+            <p className="mt-1 text-xs text-slate-400">Colored boxes show detected watermark regions</p>
           )}
         </div>
 
-        {/* Right: Candidate list */}
+        {/* Candidate list + actions */}
         <div className="space-y-3">
-          {/* Bulk actions */}
-          {detections.length > 0 && (
+          {/* Bulk controls */}
+          {detections.length > 1 && (
             <div className="flex flex-wrap gap-2">
-              <button
-                type="button"
-                onClick={selectAll}
-                disabled={isRemoving}
-                className="inline-flex items-center gap-1.5 rounded-lg bg-brand-50 px-3 py-1.5 text-xs font-semibold text-brand-700 border border-brand-200 hover:bg-brand-100 transition-all disabled:opacity-50"
-              >
-                <CheckSquare className="h-3.5 w-3.5" />
-                Select All
+              <button type="button" onClick={selectAll} disabled={isRemoving}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-brand-50 border border-brand-200 px-3 py-1.5 text-xs font-semibold text-brand-700 hover:bg-brand-100 transition-all disabled:opacity-50">
+                <CheckSquare className="h-3.5 w-3.5" /> Select All
               </button>
-              <button
-                type="button"
-                onClick={deselectAll}
-                disabled={isRemoving}
-                className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-semibold text-slate-600 hover:bg-slate-100 transition-all disabled:opacity-50"
-              >
-                <Square className="h-3.5 w-3.5" />
-                Deselect All
+              <button type="button" onClick={deselectAll} disabled={isRemoving}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-semibold text-slate-600 hover:bg-slate-100 transition-all disabled:opacity-50">
+                <Square className="h-3.5 w-3.5" /> Deselect All
               </button>
             </div>
           )}
 
           {/* High confidence */}
           {highConf.length > 0 && (
-            <DetectionGroup
-              title="High Confidence Detections"
-              detections={highConf}
-              selectedIds={selectedIds}
-              onToggle={toggleSelection}
-              disabled={isRemoving}
-            />
+            <DetectionGroup title="High Confidence" detections={highConf}
+              selectedIds={selectedIds} onToggle={toggleSelection} disabled={isRemoving} />
           )}
 
           {/* Medium confidence */}
           {medConf.length > 0 && (
-            <DetectionGroup
-              title="Possible Watermarks (Review)"
-              detections={medConf}
-              selectedIds={selectedIds}
-              onToggle={toggleSelection}
-              disabled={isRemoving}
-            />
+            <DetectionGroup title="Possible Watermarks — Please Review" detections={medConf}
+              selectedIds={selectedIds} onToggle={toggleSelection} disabled={isRemoving} />
           )}
 
           {/* Low confidence */}
           {lowConf.length > 0 && (
-            <DetectionGroup
-              title="Low Confidence (Optional)"
-              detections={lowConf}
-              selectedIds={selectedIds}
-              onToggle={toggleSelection}
-              disabled={isRemoving}
-            />
+            <DetectionGroup title="Low Confidence (Optional)" detections={lowConf}
+              selectedIds={selectedIds} onToggle={toggleSelection} disabled={isRemoving} />
           )}
 
-          {/* No detections message */}
+          {/* No detections */}
           {detections.length === 0 && (
             <div className="rounded-xl border border-slate-200 bg-slate-50 p-4 text-sm text-slate-500">
-              No watermarks were automatically detected. You can draw boxes manually on the image below.
+              No watermarks were automatically detected. Use the mask editor below to draw areas manually.
             </div>
           )}
 
-          {/* Manual selections list */}
-          {manualBboxes.length > 0 && (
-            <div>
-              <p className="mb-1.5 text-xs font-semibold text-slate-500 uppercase tracking-wide">
-                Manual Selections ({manualBboxes.length})
-              </p>
-              <div className="space-y-1.5">
-                {manualBboxes.map((b) => (
-                  <div
-                    key={b.id}
-                    className="flex items-center justify-between rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs"
-                  >
-                    <span className="text-amber-800 font-medium">
-                      Manual region: {b.width}×{b.height}px at ({b.x},{b.y})
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => handleRemoveBbox(b.id)}
-                      className="ml-2 text-amber-600 hover:text-amber-800"
-                      aria-label="Remove manual selection"
-                    >
-                      <X className="h-3.5 w-3.5" />
-                    </button>
-                  </div>
-                ))}
-              </div>
+          {/* Error inline */}
+          {errorMessage && stage !== "error" && (
+            <div className="flex items-start gap-2 rounded-xl border border-red-200 bg-red-50 p-3 text-xs font-medium text-red-700">
+              <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+              {errorMessage}
             </div>
           )}
 
-          {/* Action buttons */}
-          <div className="flex flex-wrap gap-2 pt-2">
+          {/* Primary actions */}
+          <div className="flex flex-wrap gap-2 pt-1">
             <button
               type="button"
               onClick={confirmRemoval}
-              disabled={isRemoving || (selectedIds.size === 0)}
-              className="inline-flex items-center gap-2 rounded-2xl bg-gradient-to-r from-brand-600 to-brand-500 px-5 py-2.5 text-sm font-bold text-white shadow-lg shadow-brand-500/25 hover:from-brand-700 hover:to-brand-600 hover:scale-[1.01] transition-all disabled:opacity-50 disabled:scale-100"
+              disabled={isRemoving || selectedIds.size === 0}
+              className="inline-flex items-center gap-2 rounded-2xl bg-gradient-to-r from-brand-600 to-brand-500 px-5 py-2.5 text-sm font-bold text-white shadow-lg shadow-brand-500/25 hover:from-brand-700 hover:to-brand-600 transition-all disabled:opacity-50"
             >
-              {isRemoving ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
-              ) : (
-                <Wand2 className="h-4 w-4" />
-              )}
-              {isRemoving
-                ? "Removing…"
-                : `Remove ${selectedIds.size} Selected`}
+              {isRemoving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Wand2 className="h-4 w-4" />}
+              {isRemoving ? "Removing…" : `Remove ${selectedIds.size} Selected`}
             </button>
 
             <button
@@ -581,97 +614,31 @@ export function ImageWatermarkTool({ file, onReset }: ImageWatermarkToolProps) {
               {showMaskEditor ? "Hide Editor" : "Edit Mask / Add Area"}
             </button>
           </div>
-
-          {errorMessage && stage !== "error" && (
-            <div className="rounded-xl border border-red-200 bg-red-50 p-3 text-xs font-medium text-red-700 flex items-start gap-2">
-              <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
-              {errorMessage}
-            </div>
-          )}
         </div>
       </div>
 
       {/* Mask editor */}
-      {showMaskEditor && (previewUrl || annotatedPreviewUrl) && (
+      {showMaskEditor && previewUrl && (
         <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-          <p className="mb-2 font-semibold text-slate-800 text-sm">
-            Mask Editor — drag to add regions
-          </p>
+          <p className="mb-1 font-semibold text-slate-800 text-sm">Mask Editor</p>
           <p className="mb-3 text-xs text-slate-500">
-            Drag a box over any area to add it to the removal mask. Blue boxes = AI detections.
-            Orange boxes = your manual selections.
+            Drag to add regions to remove. Blue = AI-detected. Orange = manual selections.
           </p>
           <ManualBboxDraw
-            imageUrl={previewUrl ?? ""}
+            imageUrl={previewUrl}
             imageW={imageW}
             imageH={imageH}
             onAddBbox={handleAddBbox}
-            existingBboxes={manualBboxes}
+            manualEntries={manualEntries}
             aiDetections={detections}
             selectedIds={selectedIds}
-            onRemoveId={handleRemoveBbox}
+            onRemoveManual={handleRemoveBbox}
           />
           <p className="mt-2 text-xs text-slate-400">
             {selectedIds.size} region{selectedIds.size === 1 ? "" : "s"} selected for removal
           </p>
         </div>
       )}
-    </div>
-  );
-}
-
-// ─── Detection group component ────────────────────────────────────────────────
-
-interface DetectionGroupProps {
-  title: string;
-  detections: ImageDetectionResult[];
-  selectedIds: Set<string>;
-  onToggle: (id: string) => void;
-  disabled: boolean;
-}
-
-function DetectionGroup({ title, detections, selectedIds, onToggle, disabled }: DetectionGroupProps) {
-  return (
-    <div>
-      <p className="mb-1.5 text-xs font-semibold text-slate-500 uppercase tracking-wide">{title}</p>
-      <div className="space-y-2">
-        {detections.map((det) => {
-          const badge = confidenceBadge(det.confidence);
-          const selected = selectedIds.has(det.detection_id);
-          return (
-            <label
-              key={det.detection_id}
-              className={`flex cursor-pointer items-start gap-3 rounded-xl border p-3 transition-colors ${
-                selected
-                  ? "border-brand-300 bg-brand-50/60"
-                  : "border-slate-200 bg-white hover:border-brand-200"
-              } ${disabled ? "pointer-events-none opacity-60" : ""}`}
-            >
-              <input
-                type="checkbox"
-                checked={selected}
-                onChange={() => onToggle(det.detection_id)}
-                className="mt-0.5 h-4 w-4 rounded border-slate-300 text-brand-600 focus:ring-brand-500"
-                disabled={disabled}
-              />
-              <div className="min-w-0 flex-1">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <p className="font-medium text-slate-800 text-sm truncate max-w-[180px]">
-                    {typeLabel(det.type)}: {det.label.length > 30 ? det.label.slice(0, 30) + "…" : det.label}
-                  </p>
-                  <span className={`shrink-0 rounded-full border px-2 py-0.5 text-xs font-semibold ${badge.cls}`}>
-                    {badge.text}
-                  </span>
-                </div>
-                <p className="mt-0.5 text-xs text-slate-500">
-                  {det.bbox.width}×{det.bbox.height}px at ({det.bbox.x},{det.bbox.y}) ·{" "}
-                  {det.reasons.slice(0, 2).join(", ")}
-                </p>
-              </div>
-            </label>
-          );
-        })}
-      </div>
     </div>
   );
 }

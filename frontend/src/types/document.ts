@@ -142,3 +142,18 @@ export interface ImageDetectionResponse {
   image_height: number;
   message: string;
 }
+
+// ─── Live Progress ────────────────────────────────────────────────────────────
+
+export interface JobProgressResponse {
+  success: true;
+  document_id: string;
+  stage: "idle" | "uploaded" | "analyzing" | "analyzed" | "detecting" | "detected" | "processing" | "processed" | "error";
+  current_page: number;
+  total_pages: number;
+  percent: number;
+  message: string;
+  candidates_count: number;
+  failed_pages: number[];
+  error: string | null;
+}

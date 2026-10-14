@@ -6,6 +6,7 @@ import type {
   DocumentAnalysisResponse,
   DocumentUploadResponse,
   ImageDetectionResponse,
+  JobProgressResponse,
   ManualRegion,
   ManualRemovalResponse,
   OcrResponse,
@@ -84,6 +85,15 @@ export async function checkHealth(): Promise<boolean> {
     return response.data.status === "ok";
   } catch {
     return false;
+  }
+}
+
+export async function getJobProgress(documentId: string): Promise<JobProgressResponse> {
+  try {
+    const response = await apiClient.get<JobProgressResponse>(`/api/v1/documents/${documentId}/progress`);
+    return response.data;
+  } catch (error) {
+    throw toApiRequestError(error);
   }
 }
 

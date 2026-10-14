@@ -6,13 +6,12 @@ import {
   previewImageDetections,
   removeImageWatermark,
 } from "../services/api";
-import type { ImageDetectionResponse, ImageDetectionResult } from "../types/document";
+import type { ImageDetectionResponse } from "../types/document";
 
 // ─── State types ─────────────────────────────────────────────────────────────
 
 export type ImageWorkflowStage =
   | "idle"
-  | "uploading"
   | "detecting"
   | "detected"
   | "removing"
@@ -22,9 +21,9 @@ export type ImageWorkflowStage =
 interface ImageWatermarkState {
   stage: ImageWorkflowStage;
   file: File | null;
-  previewUrl: string | null;          // original image object URL (for display)
-  annotatedPreviewUrl: string | null; // preview with detection overlays
-  resultUrl: string | null;           // cleaned image download URL
+  previewUrl: string | null;
+  annotatedPreviewUrl: string | null;
+  resultUrl: string | null;
   resultBlob: Blob | null;
   detection: ImageDetectionResponse | null;
   selectedIds: Set<string>;
@@ -37,61 +36,61 @@ interface UseImageWatermarkReturn extends ImageWatermarkState {
   toggleSelection: (id: string) => void;
   selectAll: () => void;
   deselectAll: () => void;
-  addManualBbox: (bbox: { x: number; y: number; width: number; height: number }) => void;
+  /** Adds a manual bbox, returns the generated id for tracking */
+  addManualBbox: (bbox: { x: number; y: number; width: number; height: number }) => string;
   removeById: (id: string) => void;
   confirmRemoval: () => Promise<void>;
   scanAgain: () => Promise<void>;
   reset: () => void;
 }
 
+// Extra manual bboxes the user draws on the canvas (not from AI)
+interface ManualBbox {
+  id: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+const INITIAL_STATE: ImageWatermarkState = {
+  stage: "idle",
+  file: null,
+  previewUrl: null,
+  annotatedPreviewUrl: null,
+  resultUrl: null,
+  resultBlob: null,
+  detection: null,
+  selectedIds: new Set(),
+  errorMessage: null,
+  uploadProgress: 0,
+};
+
 export function useImageWatermark(): UseImageWatermarkReturn {
-  const [state, setState] = useState<ImageWatermarkState>({
-    stage: "idle",
-    file: null,
-    previewUrl: null,
-    annotatedPreviewUrl: null,
-    resultUrl: null,
-    resultBlob: null,
-    detection: null,
-    selectedIds: new Set(),
-    errorMessage: null,
-    uploadProgress: 0,
-  });
+  const [state, setState] = useState<ImageWatermarkState>(INITIAL_STATE);
+  const manualBboxesRef = useRef<ManualBbox[]>([]);
+  // Keep a ref to the current file so callbacks can read it without stale closure
+  const fileRef = useRef<File | null>(null);
 
-  // Track extra manual bboxes added by the user (not from AI detection)
-  const manualBboxesRef = useRef<Array<{ id: string; x: number; y: number; width: number; height: number }>>([]);
-
-  const setStage = (stage: ImageWorkflowStage, extra?: Partial<ImageWatermarkState>) =>
-    setState((prev) => ({ ...prev, stage, ...extra }));
-
-  // ─── Revoke old object URLs to avoid memory leaks ───────────────────────
-  const revokeUrls = (s: ImageWatermarkState) => {
-    if (s.previewUrl) URL.revokeObjectURL(s.previewUrl);
-    if (s.annotatedPreviewUrl) URL.revokeObjectURL(s.annotatedPreviewUrl);
-    if (s.resultUrl) URL.revokeObjectURL(s.resultUrl);
+  // Revoke blob URLs to prevent memory leaks
+  const revokeAll = (s: ImageWatermarkState) => {
+    if (s.previewUrl?.startsWith("blob:")) URL.revokeObjectURL(s.previewUrl);
+    if (s.annotatedPreviewUrl?.startsWith("blob:")) URL.revokeObjectURL(s.annotatedPreviewUrl);
+    if (s.resultUrl?.startsWith("blob:")) URL.revokeObjectURL(s.resultUrl);
   };
 
-  // ─── Main flow entry point ───────────────────────────────────────────────
+  // ─── Core: run detection for a given file ────────────────────────────────
   const startWithFile = useCallback(async (file: File) => {
-    // Create a local preview URL
-    const localPreview = URL.createObjectURL(file);
-
     setState((prev) => {
-      revokeUrls(prev);
+      revokeAll(prev);
       return {
+        ...INITIAL_STATE,
         stage: "detecting",
         file,
-        previewUrl: localPreview,
-        annotatedPreviewUrl: null,
-        resultUrl: null,
-        resultBlob: null,
-        detection: null,
-        selectedIds: new Set(),
-        errorMessage: null,
-        uploadProgress: 0,
+        previewUrl: URL.createObjectURL(file),
       };
     });
-
+    fileRef.current = file;
     manualBboxesRef.current = [];
 
     try {
@@ -99,19 +98,19 @@ export function useImageWatermark(): UseImageWatermarkReturn {
         setState((prev) => ({ ...prev, uploadProgress: pct })),
       );
 
-      // Pre-select high-confidence detections (>= 0.70)
+      // Pre-select high-confidence detections (≥ 0.70)
       const autoSelected = new Set(
         detection.detections
           .filter((d) => d.confidence >= 0.70)
           .map((d) => d.detection_id),
       );
 
-      // Build annotated preview
-      let annotatedUrl: string | null = null;
+      // Generate annotated preview (non-critical — failures are silent)
+      let annotatedPreviewUrl: string | null = null;
       try {
-        annotatedUrl = await previewImageDetections(file, detection.detections as object[]);
+        annotatedPreviewUrl = await previewImageDetections(file, detection.detections as object[]);
       } catch {
-        // non-critical: fall back to plain preview
+        // fall back to plain preview
       }
 
       setState((prev) => ({
@@ -119,7 +118,7 @@ export function useImageWatermark(): UseImageWatermarkReturn {
         stage: "detected",
         detection,
         selectedIds: autoSelected,
-        annotatedPreviewUrl: annotatedUrl,
+        annotatedPreviewUrl,
         errorMessage: null,
       }));
     } catch (err) {
@@ -127,16 +126,15 @@ export function useImageWatermark(): UseImageWatermarkReturn {
         err instanceof ApiRequestError
           ? err.message
           : "Watermark detection failed. Please try again.";
-      setStage("error", { errorMessage: msg });
+      setState((prev) => ({ ...prev, stage: "error", errorMessage: msg }));
     }
   }, []);
 
-  // ─── Selection management ─────────────────────────────────────────────────
+  // ─── Selection helpers ────────────────────────────────────────────────────
   const toggleSelection = useCallback((id: string) => {
     setState((prev) => {
       const next = new Set(prev.selectedIds);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
+      if (next.has(id)) next.delete(id); else next.add(id);
       return { ...prev, selectedIds: next };
     });
   }, []);
@@ -156,14 +154,15 @@ export function useImageWatermark(): UseImageWatermarkReturn {
   }, []);
 
   const addManualBbox = useCallback(
-    (bbox: { x: number; y: number; width: number; height: number }) => {
-      const id = `manual_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+    (bbox: { x: number; y: number; width: number; height: number }): string => {
+      const id = `manual_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
       manualBboxesRef.current = [...manualBboxesRef.current, { id, ...bbox }];
       setState((prev) => {
         const next = new Set(prev.selectedIds);
         next.add(id);
         return { ...prev, selectedIds: next };
       });
+      return id;
     },
     [],
   );
@@ -179,100 +178,72 @@ export function useImageWatermark(): UseImageWatermarkReturn {
 
   // ─── Removal ──────────────────────────────────────────────────────────────
   const confirmRemoval = useCallback(async () => {
+    // Read current state synchronously to avoid stale closures
+    let currentFile: File | null = null;
+    let currentDetection: ImageDetectionResponse | null = null;
+    let currentSelectedIds: Set<string> = new Set();
+
     setState((prev) => {
-      if (!prev.file || (prev.selectedIds.size === 0 && manualBboxesRef.current.length === 0))
-        return prev;
+      currentFile = prev.file;
+      currentDetection = prev.detection;
+      currentSelectedIds = prev.selectedIds;
+      if (!currentFile || currentSelectedIds.size === 0) return prev;
       return { ...prev, stage: "removing", errorMessage: null };
     });
 
-    setState((prev) => {
-      if (!prev.file) return prev;
+    if (!currentFile || currentSelectedIds.size === 0) return;
 
-      const file = prev.file;
-      const detection = prev.detection;
-      const selectedIds = prev.selectedIds;
+    // Collect AI detection bboxes
+    const aiBboxes = (currentDetection?.detections ?? [])
+      .filter((d) => currentSelectedIds.has(d.detection_id))
+      .map((d) => ({ x: d.bbox.x, y: d.bbox.y, width: d.bbox.width, height: d.bbox.height }));
 
-      // Collect bboxes from selected AI detections
-      const aiBboxes: Array<{ x: number; y: number; width: number; height: number }> =
-        (detection?.detections ?? [])
-          .filter((d) => selectedIds.has(d.detection_id))
-          .map((d) => ({
-            x: d.bbox.x,
-            y: d.bbox.y,
-            width: d.bbox.width,
-            height: d.bbox.height,
-          }));
+    // Collect manual bboxes
+    const manualBboxes = manualBboxesRef.current
+      .filter((b) => currentSelectedIds.has(b.id))
+      .map(({ id: _id, ...rest }) => rest);
 
-      // Collect bboxes from manual selections
-      const manualBboxes = manualBboxesRef.current
-        .filter((b) => selectedIds.has(b.id))
-        .map(({ id: _id, ...bbox }) => bbox);
+    const allBboxes = [...aiBboxes, ...manualBboxes];
 
-      const allBboxes = [...aiBboxes, ...manualBboxes];
+    if (allBboxes.length === 0) {
+      setState((prev) => ({ ...prev, stage: "detected", errorMessage: "No regions selected for removal." }));
+      return;
+    }
 
-      if (allBboxes.length === 0) {
-        return { ...prev, stage: "detected", errorMessage: "No regions selected for removal." };
-      }
-
-      // Kick off async removal
-      (async () => {
-        try {
-          const blob = await removeImageWatermark(file, allBboxes);
-          const resultUrl = URL.createObjectURL(blob);
-          setState((s) => ({
-            ...s,
-            stage: "done",
-            resultBlob: blob,
-            resultUrl,
-          }));
-        } catch (err) {
-          const msg =
-            err instanceof ApiRequestError
-              ? err.message
-              : "Watermark removal failed. Please try again.";
-          setState((s) => ({ ...s, stage: "error", errorMessage: msg }));
-        }
-      })();
-
-      return prev; // Return immediately; state will update async
-    });
+    try {
+      const blob = await removeImageWatermark(currentFile, allBboxes);
+      const resultUrl = URL.createObjectURL(blob);
+      setState((prev) => ({
+        ...prev,
+        stage: "done",
+        resultBlob: blob,
+        resultUrl,
+      }));
+    } catch (err) {
+      const msg =
+        err instanceof ApiRequestError
+          ? err.message
+          : "Watermark removal failed. Please try again.";
+      setState((prev) => ({ ...prev, stage: "error", errorMessage: msg }));
+    }
   }, []);
 
   // ─── Re-scan ──────────────────────────────────────────────────────────────
   const scanAgain = useCallback(async () => {
-    setState((prev) => {
-      if (!prev.file) return prev;
-      return { ...prev, stage: "detecting", errorMessage: null };
-    });
-
-    setState((prev) => {
-      const file = prev.file;
-      if (!file) return prev;
-      (async () => {
-        await startWithFile(file);
-      })();
-      return prev;
-    });
+    const file = fileRef.current;
+    if (file) {
+      await startWithFile(file);
+    }
   }, [startWithFile]);
 
-  // ─── Reset ───────────────────────────────────────────────────────────────
+  // ─── Reset ────────────────────────────────────────────────────────────────
   const reset = useCallback(() => {
     setState((prev) => {
-      revokeUrls(prev);
-      return {
-        stage: "idle",
-        file: null,
-        previewUrl: null,
-        annotatedPreviewUrl: null,
-        resultUrl: null,
-        resultBlob: null,
-        detection: null,
-        selectedIds: new Set(),
-        errorMessage: null,
-        uploadProgress: 0,
-      };
+      revokeAll(prev);
+      return { ...INITIAL_STATE };
     });
     manualBboxesRef.current = [];
+    fileRef.current = null;
   }, []);
 
   return {
