@@ -19,7 +19,7 @@ import logging
 from collections import defaultdict
 from pathlib import Path
 
-import fitz  # PyMuPDF
+import pymupdf as fitz
 
 from app.schemas.manual import ManualRegion
 from app.services.image_inpainting import build_smart_mask, inpaint_frame

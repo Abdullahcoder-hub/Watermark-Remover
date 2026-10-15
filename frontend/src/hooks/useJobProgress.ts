@@ -18,7 +18,7 @@ const TERMINAL_STAGES: JobProgressResponse["stage"][] = [
 ];
 
 interface UseJobProgressOptions {
-  /** How often to poll in milliseconds (default: 1200ms) */
+  /** How often to poll in milliseconds (default: 500ms) */
   intervalMs?: number;
 }
 
@@ -31,54 +31,56 @@ interface UseJobProgressResult {
 }
 
 export function useJobProgress(options: UseJobProgressOptions = {}): UseJobProgressResult {
-  const { intervalMs = 1200 } = options;
+  const { intervalMs = 500 } = options;
   const [progress, setProgress] = useState<JobProgressResponse | null>(null);
   const [isPolling, setIsPolling] = useState(false);
-  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const documentIdRef = useRef<string | null>(null);
+  const pollingRef = useRef(false);
 
   const stopPolling = useCallback(() => {
-    if (intervalRef.current !== null) {
-      clearInterval(intervalRef.current);
-      intervalRef.current = null;
+    pollingRef.current = false;
+    if (timeoutRef.current !== null) {
+      clearTimeout(timeoutRef.current);
+      timeoutRef.current = null;
     }
     setIsPolling(false);
   }, []);
 
   const poll = useCallback(async () => {
     const docId = documentIdRef.current;
-    if (!docId) return;
+    if (!docId || !pollingRef.current) return;
 
     try {
       const result = await getJobProgress(docId);
+      if (!pollingRef.current || documentIdRef.current !== docId) return;
       setProgress(result);
       if (TERMINAL_STAGES.includes(result.stage)) {
         stopPolling();
+        return;
       }
     } catch {
       // Silently ignore polling errors — the main request handler shows errors
     }
-  }, [stopPolling]);
+
+    if (pollingRef.current && documentIdRef.current === docId) {
+      timeoutRef.current = setTimeout(() => void poll(), intervalMs);
+    }
+  }, [intervalMs, stopPolling]);
 
   const startPolling = useCallback(
     (documentId: string) => {
       // Stop any existing poll cycle
-      if (intervalRef.current !== null) {
-        clearInterval(intervalRef.current);
-        intervalRef.current = null;
-      }
+      stopPolling();
 
       documentIdRef.current = documentId;
+      pollingRef.current = true;
       setIsPolling(true);
 
       // Immediate first fetch
       void poll();
-
-      intervalRef.current = setInterval(() => {
-        void poll();
-      }, intervalMs);
     },
-    [poll, intervalMs],
+    [poll, stopPolling],
   );
 
   const reset = useCallback(() => {
@@ -90,8 +92,9 @@ export function useJobProgress(options: UseJobProgressOptions = {}): UseJobProgr
   // Cleanup on unmount
   useEffect(() => {
     return () => {
-      if (intervalRef.current !== null) {
-        clearInterval(intervalRef.current);
+      pollingRef.current = false;
+      if (timeoutRef.current !== null) {
+        clearTimeout(timeoutRef.current);
       }
     };
   }, []);

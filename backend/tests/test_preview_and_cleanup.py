@@ -9,7 +9,7 @@ import time
 from datetime import timedelta
 from pathlib import Path
 
-import fitz  # PyMuPDF
+import pymupdf as fitz
 from fastapi.testclient import TestClient
 
 from app.main import app

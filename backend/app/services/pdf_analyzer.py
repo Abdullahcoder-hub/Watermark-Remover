@@ -18,7 +18,7 @@ import math
 from pathlib import Path
 from typing import Callable
 
-import fitz  # PyMuPDF
+import pymupdf as fitz
 
 from app.schemas.analysis import DocumentAnalysisResponse, ImageObject, PageAnalysis, TextObject
 

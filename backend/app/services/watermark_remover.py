@@ -11,7 +11,7 @@ import gc
 from pathlib import Path
 from typing import Callable
 
-import fitz  # PyMuPDF
+import pymupdf as fitz
 
 from app.schemas.watermark import WatermarkCandidate
 from app.services.image_remover import ImageRemovalError, _closest_rect

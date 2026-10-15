@@ -17,7 +17,7 @@ shared image object itself, so other pages keep rendering it normally).
 """
 from pathlib import Path
 
-import fitz  # PyMuPDF
+import pymupdf as fitz
 
 from app.schemas.watermark import WatermarkCandidate
 

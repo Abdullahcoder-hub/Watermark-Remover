@@ -23,9 +23,10 @@ MINIMAL_PDF = (
 
 
 def test_health_check() -> None:
-    response = client.get("/api/v1/health")
-    assert response.status_code == 200
-    assert response.json()["status"] == "ok"
+    for path in ("/api/v1/health", "/"):
+        response = client.get(path)
+        assert response.status_code == 200
+        assert response.json()["status"] == "ok"
 
 
 def test_upload_valid_pdf() -> None:

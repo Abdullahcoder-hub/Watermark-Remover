@@ -22,7 +22,7 @@ page, run Tesseract, place invisible text at each word's position."
 import io
 from pathlib import Path
 
-import fitz  # PyMuPDF
+import pymupdf as fitz
 import pytesseract
 from PIL import Image
 from pytesseract import Output

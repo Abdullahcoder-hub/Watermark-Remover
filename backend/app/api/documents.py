@@ -14,7 +14,7 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 
-import fitz  # PyMuPDF
+import pymupdf as fitz
 from fastapi import APIRouter, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse, Response
 

@@ -9,7 +9,7 @@ Run with: pytest
 """
 import io
 
-import fitz  # PyMuPDF
+import pymupdf as fitz
 from fastapi.testclient import TestClient
 
 from app.main import app
@@ -522,5 +522,4 @@ def test_manual_removal_deletes_separate_overlay_logo_not_just_inpaints_scan() -
     body_pix = page.get_pixmap(clip=fitz.Rect(30, 50, 400, 100))
     assert any(b < 120 for b in body_pix.samples), "body text region appears blank"
     cleaned.close()
-
 

@@ -79,12 +79,13 @@ export async function uploadDocument(file: File, onProgress?: (percent: number) 
   }
 }
 
-export async function checkHealth(): Promise<boolean> {
+export async function checkHealth(): Promise<number | null> {
+  const startedAt = performance.now();
   try {
-    const response = await apiClient.get("/api/v1/health");
-    return response.data.status === "ok";
+    const response = await apiClient.get("/api/v1/health", { timeout: 5000 });
+    return response.data.status === "ok" ? Math.round(performance.now() - startedAt) : null;
   } catch {
-    return false;
+    return null;
   }
 }
 

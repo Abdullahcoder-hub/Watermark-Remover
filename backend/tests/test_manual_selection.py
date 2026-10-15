@@ -8,7 +8,7 @@ Run with: pytest
 """
 import io
 
-import fitz  # PyMuPDF
+import pymupdf as fitz
 from fastapi.testclient import TestClient
 
 from app.main import app

@@ -10,7 +10,7 @@ import re
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-import fitz  # PyMuPDF
+import pymupdf as fitz
 
 from app.schemas.watermark import WatermarkCandidate
 

@@ -8,7 +8,7 @@ Production Architecture & Security Verification Tests:
 """
 import io
 import pytest
-import fitz  # PyMuPDF
+import pymupdf as fitz
 from fastapi.testclient import TestClient
 from pathlib import Path
 
