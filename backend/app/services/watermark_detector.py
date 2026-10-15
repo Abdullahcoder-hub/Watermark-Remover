@@ -104,7 +104,7 @@ MODERATE_SIZE_WEIGHT = 0.20
 
 ROTATION_TOLERANCE_DEGREES = 2.0
 LARGE_TEXT_HEIGHT_RATIO = 0.05
-MIN_WATERMARK_IMAGE_COVERAGE = 0.015
+MIN_WATERMARK_IMAGE_COVERAGE = 0.0005
 MAX_WATERMARK_IMAGE_COVERAGE = SCANNED_IMAGE_COVERAGE_THRESHOLD
 CENTERED_TOLERANCE_FRACTION = 0.35
 
@@ -149,13 +149,19 @@ def _is_centered(bbox: tuple[float, float, float, float], page_width: float, pag
 def _is_corner_badge(bbox: tuple[float, float, float, float], page_width: float, page_height: float) -> bool:
     if page_width <= 0 or page_height <= 0:
         return False
+    w_frac = (bbox[2] - bbox[0]) / page_width
+    h_frac = (bbox[3] - bbox[1]) / page_height
+    # A corner badge must be compact (not spanning the page width)
+    if w_frac > 0.35 or h_frac > 0.20:
+        return False
+
     bottom_frac = bbox[3] / page_height
     right_frac = bbox[2] / page_width
     left_frac = bbox[0] / page_width
     top_frac = bbox[1] / page_height
 
-    is_bottom_corner = bottom_frac >= 0.85 and (left_frac <= 0.25 or right_frac >= 0.75)
-    is_top_corner = top_frac <= 0.15 and (left_frac <= 0.25 or right_frac >= 0.75)
+    is_bottom_corner = bottom_frac >= 0.85 and (left_frac <= 0.30 or right_frac >= 0.70)
+    is_top_corner = top_frac <= 0.15 and (left_frac <= 0.30 or right_frac >= 0.70)
     return is_bottom_corner or is_top_corner
 
 
@@ -188,7 +194,8 @@ def _generate_text_candidates(analysis: DocumentAnalysisResponse) -> list[Waterm
             is_center = _is_centered(obj.bbox, page_width, page_height)
 
             # Signal filtering: Normal body text without watermark characteristics is ignored
-            if not is_explicit_match and not is_rotated and not (page_rep_count >= 3 and (is_faint or is_large or is_center)):
+            is_repeated_watermark = page_rep_count >= 3 and (is_faint or is_large or is_corner or (is_center and is_large))
+            if not is_explicit_match and not is_rotated and not is_repeated_watermark:
                 continue
 
             score = 0.0
@@ -197,6 +204,7 @@ def _generate_text_candidates(analysis: DocumentAnalysisResponse) -> list[Waterm
             if is_explicit_match:
                 score += EXPLICIT_SIGNATURE_SCORE
                 reasons.append("matches known watermark phrase")
+                reasons.append("matches common watermark wording")
 
             if is_rotated:
                 score += ROTATION_WEIGHT
@@ -277,7 +285,7 @@ def _generate_image_candidates(analysis: DocumentAnalysisResponse) -> list[Water
                 reasons.append("centered page stamp placement")
 
             if _is_corner_badge(img.bbox, page_width, page_height):
-                score += CORNER_LOGO_WEIGHT
+                score += (CORNER_LOGO_WEIGHT + 0.30)
                 reasons.append("positioned in corner scanner badge area")
 
             if score <= 0:

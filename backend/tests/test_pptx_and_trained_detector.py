@@ -4,13 +4,18 @@ tokenless heuristic watermark knowledge base (CamScanner, Gamma, Canva, etc.).
 """
 from __future__ import annotations
 
+from pathlib import Path
 import io
+import tempfile
 import zipfile
 import xml.etree.ElementTree as ET
 from fastapi.testclient import TestClient
 
 from app.main import app
 from app.schemas.analysis import DocumentAnalysisResponse, PageAnalysis, TextObject
+from app.schemas.manual import ManualRegion
+from app.schemas.watermark import WatermarkCandidate
+from app.services.pptx_processor import remove_pptx_manual_regions, remove_pptx_watermarks
 from app.services.watermark_detector import generate_candidates
 
 client = TestClient(app)
@@ -87,6 +92,75 @@ def _build_test_pptx(watermark_text: str = "Made with Gamma", title_text: str = 
         zf.writestr("ppt/slides/slide2.xml", make_slide_xml("Slide 2 Key Findings"))
 
     return buf.getvalue()
+
+
+def _add_shared_layout(
+    pptx_bytes: bytes,
+    watermark_text: str = "Made with Gamma",
+    include_corner_image: bool = False,
+) -> bytes:
+    """Add a layout watermark referenced by both test slides."""
+    corner_image = (
+        '<p:pic><p:spPr><a:xfrm><a:off x="11000000" y="6500000"/>'
+        '<a:ext cx="300000" cy="300000"/></a:xfrm></p:spPr></p:pic>'
+        if include_corner_image
+        else ""
+    )
+    layout_xml = (
+        '<p:sldLayout xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" '
+        'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">'
+        '<p:cSld><p:spTree><p:sp>'
+        '<p:spPr><a:xfrm><a:off x="1000000" y="6000000"/>'
+        '<a:ext cx="4000000" cy="500000"/></a:xfrm></p:spPr>'
+        '<p:txBody><a:p><a:r><a:t>' + watermark_text + '</a:t></a:r></a:p></p:txBody>'
+        '</p:sp>' + corner_image + '</p:spTree></p:cSld></p:sldLayout>'
+    )
+    relationships = (
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Id="rId1" '
+        'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" '
+        'Target="../slideLayouts/slideLayout1.xml"/>'
+        '</Relationships>'
+    )
+
+    result = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(pptx_bytes), "r") as source, zipfile.ZipFile(
+        result, "w", zipfile.ZIP_DEFLATED
+    ) as destination:
+        for name in source.namelist():
+            content = source.read(name)
+            if name in {"ppt/slides/slide1.xml", "ppt/slides/slide2.xml"}:
+                slide = ET.fromstring(content)
+                shape_tree = slide.find(".//{http://schemas.openxmlformats.org/presentationml/2006/main}spTree")
+                if shape_tree is not None:
+                    for shape in list(shape_tree):
+                        shape_text = "".join(
+                            text.text or ""
+                            for text in shape.findall(
+                                ".//{http://schemas.openxmlformats.org/drawingml/2006/main}t"
+                            )
+                        )
+                        if shape_text == watermark_text:
+                            shape_tree.remove(shape)
+                content = ET.tostring(slide, encoding="utf-8", xml_declaration=True)
+            destination.writestr(name, content)
+        destination.writestr("ppt/slideLayouts/slideLayout1.xml", layout_xml)
+        destination.writestr("ppt/slides/_rels/slide1.xml.rels", relationships)
+        destination.writestr("ppt/slides/_rels/slide2.xml.rels", relationships)
+    return result.getvalue()
+
+
+def _gamma_candidate() -> WatermarkCandidate:
+    return WatermarkCandidate(
+        candidate_id="shared-layout-gamma",
+        type="text",
+        text="Made with Gamma",
+        page=1,
+        bbox=(78.74, 472.44, 393.7, 511.81),
+        rotation_degrees=0,
+        confidence=0.95,
+        reasons=["Recognized watermark text"],
+    )
 
 
 def test_pptx_upload_analyze_and_detect() -> None:
@@ -227,6 +301,139 @@ def test_pptx_slide_preview() -> None:
     assert len(preview_resp.content) > 100
 
 
+def test_pptx_preview_rejects_out_of_range_slide() -> None:
+    pptx_bytes = _build_test_pptx()
+    upload_resp = client.post(
+        "/api/v1/documents/upload",
+        files={"file": ("slides.pptx", pptx_bytes, "application/vnd.openxmlformats-officedocument.presentationml.presentation")},
+    )
+    document_id = upload_resp.json()["document_id"]
+
+    response = client.get(f"/api/v1/documents/{document_id}/preview/99")
+
+    assert response.status_code == 400
+    assert response.json()["detail"]["error"]["code"] == "INVALID_PAGE"
+
+
+def test_upload_rejects_zip_package_without_presentation() -> None:
+    invalid_pptx = io.BytesIO()
+    with zipfile.ZipFile(invalid_pptx, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("[Content_Types].xml", "<Types/>")
+
+    response = client.post(
+        "/api/v1/documents/upload",
+        files={"file": ("not-a-presentation.pptx", invalid_pptx.getvalue(), "application/vnd.openxmlformats-officedocument.presentationml.presentation")},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"]["error"]["code"] == "INVALID_PPTX"
+
+
+def test_upload_rejects_presentation_with_no_slides() -> None:
+    empty_pptx = io.BytesIO()
+    with zipfile.ZipFile(empty_pptx, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("[Content_Types].xml", "<Types/>")
+        archive.writestr("ppt/presentation.xml", "<presentation/>")
+
+    response = client.post(
+        "/api/v1/documents/upload",
+        files={"file": ("empty.pptx", empty_pptx.getvalue(), "application/vnd.openxmlformats-officedocument.presentationml.presentation")},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"]["error"]["code"] == "INVALID_PPTX"
+
+
+def test_pptx_selected_page_removal_preserves_shared_layout_watermark() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        source_path = Path(temp_dir) / "shared-layout.pptx"
+        source_path.write_bytes(_add_shared_layout(_build_test_pptx()))
+
+        cleaned_bytes, pages_affected, skipped_ids = remove_pptx_watermarks(
+            source_path,
+            [_gamma_candidate()],
+            pages_filter={1},
+        )
+
+    with zipfile.ZipFile(io.BytesIO(cleaned_bytes), "r") as archive:
+        layout = archive.read("ppt/slideLayouts/slideLayout1.xml").decode("utf-8")
+
+    assert "Made with Gamma" in layout
+    assert pages_affected == []
+    assert skipped_ids == ["shared-layout-gamma"]
+
+
+def test_pptx_all_page_removal_removes_shared_layout_watermark() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        source_path = Path(temp_dir) / "shared-layout.pptx"
+        source_path.write_bytes(_add_shared_layout(_build_test_pptx()))
+
+        cleaned_bytes, pages_affected, skipped_ids = remove_pptx_watermarks(
+            source_path,
+            [_gamma_candidate()],
+        )
+
+    with zipfile.ZipFile(io.BytesIO(cleaned_bytes), "r") as archive:
+        layout = archive.read("ppt/slideLayouts/slideLayout1.xml").decode("utf-8")
+
+    assert "Made with Gamma" not in layout
+    assert pages_affected == [1, 2]
+    assert skipped_ids == []
+
+
+def test_pptx_scanner_candidate_removes_shared_corner_image() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        source_path = Path(temp_dir) / "shared-layout.pptx"
+        source_path.write_bytes(
+            _add_shared_layout(
+                _build_test_pptx(watermark_text="Scanned with CamScanner"),
+                watermark_text="Scanned with CamScanner",
+                include_corner_image=True,
+            )
+        )
+        candidate = WatermarkCandidate(
+            candidate_id="shared-layout-scanner",
+            type="text",
+            text="Scanned with CamScanner",
+            page=1,
+            bbox=(78.74, 472.44, 393.7, 511.81),
+            rotation_degrees=0,
+            confidence=0.95,
+            reasons=["Recognized watermark text"],
+        )
+
+        cleaned_bytes, pages_affected, skipped_ids = remove_pptx_watermarks(
+            source_path,
+            [candidate],
+        )
+
+    with zipfile.ZipFile(io.BytesIO(cleaned_bytes), "r") as archive:
+        layout = archive.read("ppt/slideLayouts/slideLayout1.xml").decode("utf-8")
+
+    assert "Scanned with CamScanner" not in layout
+    assert "<p:pic>" not in layout
+    assert pages_affected == [1, 2]
+    assert skipped_ids == []
+
+
+def test_pptx_manual_page_selection_preserves_shared_layout() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        source_path = Path(temp_dir) / "shared-layout.pptx"
+        source_path.write_bytes(_add_shared_layout(_build_test_pptx()))
+
+        cleaned_bytes, pages_affected = remove_pptx_manual_regions(
+            source_path,
+            [ManualRegion(page=1, x0=0.05, y0=0.8, x1=0.45, y1=0.98)],
+            apply_to_all_pages=False,
+        )
+
+    with zipfile.ZipFile(io.BytesIO(cleaned_bytes), "r") as archive:
+        layout = archive.read("ppt/slideLayouts/slideLayout1.xml").decode("utf-8")
+
+    assert "Made with Gamma" in layout
+    assert pages_affected == []
+
+
 def test_no_false_positives_on_normal_document_text() -> None:
     """Test that normal body text (containing words like democracy, author names, repeated headers) is NOT falsely flagged."""
     normal_texts = [
@@ -280,3 +487,64 @@ def test_no_false_positives_on_normal_document_text() -> None:
     # None of these normal body lines should be detected as watermarks
     assert len(candidates) == 0, f"False positives detected: {[c.text for c in candidates]}"
 
+
+def test_pptx_manual_selection_removal() -> None:
+    """Test removing watermarks from PPTX using manual region selection."""
+    pptx_bytes = _build_test_pptx(watermark_text="UNAUTHORIZED COPY", title_text="Financial Q4 Review")
+    upload_resp = client.post(
+        "/api/v1/documents/upload",
+        files={"file": ("financial.pptx", pptx_bytes, "application/vnd.openxmlformats-officedocument.presentationml.presentation")},
+    )
+    assert upload_resp.status_code == 200
+    doc_id = upload_resp.json()["document_id"]
+
+    # Manual region over watermark in normalized coords [0, 1]
+    # Slide is 960 x 540 pt: wm_y0 is ~472pt (~0.875)
+    removal_resp = client.post(
+        f"/api/v1/documents/{doc_id}/manual-remove",
+        json={
+            "regions": [
+                {
+                    "page": 1,
+                    "x0": 0.05,
+                    "y0": 0.80,
+                    "x1": 0.45,
+                    "y1": 0.98,
+                }
+            ],
+            "apply_to_all_pages": False,
+        },
+    )
+    assert removal_resp.status_code == 200
+    data = removal_resp.json()
+    assert 1 in data["pages_affected"]
+
+    # Download cleaned PPTX and check that title remains while watermark is gone
+    dl_resp = client.get(f"/api/v1/documents/{doc_id}/download")
+    assert dl_resp.status_code == 200
+    cleaned_zf = zipfile.ZipFile(io.BytesIO(dl_resp.content), "r")
+    slide1_xml = cleaned_zf.read("ppt/slides/slide1.xml").decode("utf-8")
+    assert "UNAUTHORIZED COPY" not in slide1_xml
+    assert "Financial Q4 Review" in slide1_xml
+
+
+def test_pptx_gamma_watermark_detection_and_removal() -> None:
+    """Test that PPTX layout watermarks (e.g. Gamma badge) are detected and removed."""
+    gamma_path = Path("uploads/4373b740-85e1-4caa-b558-f49586746315.pptx")
+    if not gamma_path.exists():
+        return
+    from app.services.pptx_processor import analyze_pptx, remove_pptx_watermarks
+    from app.services.watermark_detector import generate_candidates
+
+    analysis = analyze_pptx("test-gamma", gamma_path)
+    candidates = generate_candidates(analysis)
+    assert any("gamma" in c.text.lower() for c in candidates)
+
+    gamma_candidates = [c for c in candidates if "gamma" in c.text.lower()]
+    cleaned_bytes, pages, _ = remove_pptx_watermarks(gamma_path, gamma_candidates)
+    assert len(pages) > 0
+    with zipfile.ZipFile(io.BytesIO(cleaned_bytes), "r") as z:
+        for name in z.namelist():
+            if "slideLayout" in name and name.endswith(".xml"):
+                content = z.read(name).decode("utf-8")
+                assert "<p:pic>" not in content and "<p:pic " not in content

@@ -68,9 +68,12 @@ const INITIAL_STATE: ImageWatermarkState = {
 
 export function useImageWatermark(): UseImageWatermarkReturn {
   const [state, setState] = useState<ImageWatermarkState>(INITIAL_STATE);
+  const stateRef = useRef<ImageWatermarkState>(INITIAL_STATE);
   const manualBboxesRef = useRef<ManualBbox[]>([]);
-  // Keep a ref to the current file so callbacks can read it without stale closure
   const fileRef = useRef<File | null>(null);
+
+  // Keep stateRef synchronized
+  stateRef.current = state;
 
   // Revoke blob URLs to prevent memory leaks
   const revokeAll = (s: ImageWatermarkState) => {
@@ -178,20 +181,10 @@ export function useImageWatermark(): UseImageWatermarkReturn {
 
   // ─── Removal ──────────────────────────────────────────────────────────────
   const confirmRemoval = useCallback(async () => {
-    // Read current state synchronously to avoid stale closures
-    let currentFile: File | null = null;
-    let currentDetection: ImageDetectionResponse | null = null;
-    let currentSelectedIds: Set<string> = new Set();
-
-    setState((prev) => {
-      currentFile = prev.file;
-      currentDetection = prev.detection;
-      currentSelectedIds = prev.selectedIds;
-      if (!currentFile || currentSelectedIds.size === 0) return prev;
-      return { ...prev, stage: "removing", errorMessage: null };
-    });
-
+    const { file: currentFile, detection: currentDetection, selectedIds: currentSelectedIds } = stateRef.current;
     if (!currentFile || currentSelectedIds.size === 0) return;
+
+    setState((prev) => ({ ...prev, stage: "removing", errorMessage: null }));
 
     // Collect AI detection bboxes
     const aiBboxes = (currentDetection?.detections ?? [])
@@ -201,7 +194,12 @@ export function useImageWatermark(): UseImageWatermarkReturn {
     // Collect manual bboxes
     const manualBboxes = manualBboxesRef.current
       .filter((b) => currentSelectedIds.has(b.id))
-      .map(({ id: _id, ...rest }) => rest);
+      .map((bbox) => ({
+        x: bbox.x,
+        y: bbox.y,
+        width: bbox.width,
+        height: bbox.height,
+      }));
 
     const allBboxes = [...aiBboxes, ...manualBboxes];
 

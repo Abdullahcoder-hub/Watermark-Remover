@@ -131,6 +131,13 @@ def _validate_image(
         raise _api_error(400, "MISSING_FILENAME", "No filename was provided.")
 
     ext = Path(filename).suffix.lower()
+    if ext in {".mp4", ".mov", ".webm", ".avi", ".mkv", ".m4v", ".flv"}:
+        raise _api_error(
+            400,
+            "UNSUPPORTED_VIDEO_FORMAT",
+            "Video files are not supported. This application processes documents (PDF, PPTX) and images.",
+        )
+
     if ext not in ALLOWED_IMAGE_EXTENSIONS:
         raise _api_error(
             400,

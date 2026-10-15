@@ -72,15 +72,25 @@ Open PowerShell in the project root (`document-cleaner\`).
 
 ```powershell
 cd backend
-python -m venv venv
-venv\Scripts\activate
+py -3.14 -m venv venv
+.\venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
-pip install -r requirements.txt
 copy ..\.env.example ..\.env
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-Backend runs at `http://localhost:8000`. Interactive API docs at `http://localhost:8000/docs`.
+If `py` is also not recognized, install Python 3.14 and enable the Python Launcher, then reopen
+PowerShell and retry. If the virtual environment already exists, skip the `py -3.14 -m venv venv`
+step and activate it directly.
+
+Keep this PowerShell window open while using the app. The backend runs at
+`http://localhost:8000`; interactive API docs are at `http://localhost:8000/docs`.
+To start it again later, open PowerShell, run `cd backend`, activate the environment with
+`.\venv\Scripts\Activate.ps1`, then run:
+
+```powershell
+python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+```
 
 ### Frontend
 
@@ -280,6 +290,11 @@ pytest tests/ -v
 - **Explicit deletion** (`DELETE /api/v1/documents/{id}`): for a person who wants their document gone
   immediately rather than waiting for the retention window, calling the same underlying cleanup logic
   as the periodic sweep.
+- **PowerPoint page scope:** slide-level watermarks can be removed from the requested slides. Slide
+  masters and layouts are shared parts, so a page-limited operation leaves those shared shapes intact
+  rather than unexpectedly changing other slides; use an all-slides operation to remove a shared
+  master/layout watermark. Such candidates are reported as skipped. Invalid slide numbers are
+  rejected instead of showing slide 1.
 
 ## What Phase 7 does NOT do yet
 
@@ -298,7 +313,8 @@ pytest tests/ -v
 
 ## Security & privacy notes
 
-- Every upload is validated by extension, size, and PDF magic bytes — never trusted on content-type header alone.
+- Every upload is validated by extension, size, and file signature — never trusted on the client
+  content-type header alone.
 - Stored files use server-generated UUIDs; the original filename is never used to build a filesystem path.
   The download filename is derived from the original name but sanitized to a safe character set.
 - Password-protected PDFs are rejected at upload, and re-checked at analysis and processing time — the
@@ -312,4 +328,5 @@ pytest tests/ -v
   service.
 - CORS is restricted to the configured frontend origin (never `*`).
 - Internal errors are logged server-side only; the client always receives a generic, safe error message.
-- Uploaded and processed files are not yet auto-deleted — the cleanup worker described in the spec is a later phase.
+- Uploaded and processed files are removed after the configured retention period, or immediately when
+  the person explicitly deletes the document.

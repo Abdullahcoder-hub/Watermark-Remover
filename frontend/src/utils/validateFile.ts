@@ -3,12 +3,14 @@
 // the actual security boundary.
 const MAX_SIZE_MB = 50;
 
-const DOCUMENT_EXTENSIONS = [".pdf", ".pptx", ".ppt"];
+const DOCUMENT_EXTENSIONS = [".pdf", ".pptx"];
 export const IMAGE_EXTENSIONS = [".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tiff", ".tif"];
-const ALL_ALLOWED_EXTENSIONS = [...DOCUMENT_EXTENSIONS, ...IMAGE_EXTENSIONS];
 
 export function validatePdfClientSide(file: File): string | null {
   const name = file.name.toLowerCase();
+  if (name.endsWith(".ppt")) {
+    return "Legacy PowerPoint (.ppt) format is not supported. Please save or convert your presentation to Modern PowerPoint (.pptx) format and re-upload.";
+  }
   const isAllowed = DOCUMENT_EXTENSIONS.some((ext) => name.endsWith(ext));
   if (!isAllowed) {
     return "Only PDF and PowerPoint (.pptx) files are supported.";

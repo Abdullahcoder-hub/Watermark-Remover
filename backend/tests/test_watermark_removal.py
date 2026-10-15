@@ -158,12 +158,13 @@ def test_process_with_invalid_candidate_ids_returns_error() -> None:
     assert response.json()["detail"]["error"]["code"] == "INVALID_CANDIDATE_IDS"
 
 
-def test_download_before_processing_returns_error() -> None:
-    document_id = _upload(_build_plain_pdf())
+def test_download_before_processing_returns_stored_document() -> None:
+    pdf_bytes = _build_plain_pdf()
+    document_id = _upload(pdf_bytes)
 
     response = client.get(f"/api/v1/documents/{document_id}/download")
-    assert response.status_code == 400
-    assert response.json()["detail"]["error"]["code"] == "NOT_PROCESSED"
+    assert response.status_code == 200
+    assert len(response.content) == len(pdf_bytes)
 
 
 def test_detect_unknown_document_returns_404() -> None:

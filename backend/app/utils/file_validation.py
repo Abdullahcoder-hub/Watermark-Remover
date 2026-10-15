@@ -48,10 +48,13 @@ def is_pptx_signature(header: bytes, contents: bytes | None = None) -> bool:
         try:
             with zipfile.ZipFile(io.BytesIO(contents), "r") as zf:
                 namelist = zf.namelist()
-                return "ppt/presentation.xml" in namelist or "[Content_Types].xml" in namelist
+                return (
+                    "ppt/presentation.xml" in namelist
+                    and "[Content_Types].xml" in namelist
+                )
         except Exception:
             return False
-    return True
+    return False
 
 
 def get_file_extension(filename: str | None) -> str:
@@ -60,6 +63,9 @@ def get_file_extension(filename: str | None) -> str:
         return ""
     suffix = Path(filename).suffix.lower()
     return suffix
+
+
+VIDEO_EXTENSIONS = {".mp4", ".mov", ".webm", ".avi", ".mkv", ".m4v", ".flv"}
 
 
 def validate_upload(
@@ -72,14 +78,27 @@ def validate_upload(
 ) -> str:
     """
     Validate an uploaded file before it is persisted to disk.
-    Returns normalized extension (e.g. '.pdf' or '.pptx').
+    Returns normalized extension ('.pdf' or '.pptx').
     """
     if not filename:
         raise FileValidationError("MISSING_FILENAME", "No filename was provided.")
 
     ext = get_file_extension(filename)
-    if ext not in ALLOWED_EXTENSIONS:
-        raise FileValidationError("INVALID_EXTENSION", "Only PDF and PowerPoint (.pptx) files are supported.")
+
+    if ext in VIDEO_EXTENSIONS or (content_type and content_type.startswith("video/")):
+        raise FileValidationError(
+            "UNSUPPORTED_VIDEO_FORMAT",
+            "Video files are not supported. This application processes documents (PDF, PPTX) and images.",
+        )
+
+    if ext == ".ppt":
+        raise FileValidationError(
+            "UNSUPPORTED_PPT_FORMAT",
+            "Legacy PowerPoint (.ppt) format is not supported. Please save or convert your presentation to Modern PowerPoint (.pptx) format and re-upload.",
+        )
+
+    if ext not in {".pdf", ".pptx"}:
+        raise FileValidationError("INVALID_EXTENSION", "Only PDF and PowerPoint (.pptx) documents are supported.")
 
     if size_bytes <= 0:
         raise FileValidationError("EMPTY_FILE", "The uploaded file is empty.")
@@ -93,7 +112,7 @@ def validate_upload(
             raise FileValidationError("INVALID_PDF", "The uploaded file is not a valid PDF.")
         return ".pdf"
 
-    if ext in (".pptx", ".ppt"):
+    if ext == ".pptx":
         if not is_pptx_signature(header, full_contents):
             raise FileValidationError("INVALID_PPTX", "The uploaded file is not a valid PowerPoint presentation.")
         return ".pptx"

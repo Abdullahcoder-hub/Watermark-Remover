@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 
 import fitz  # PyMuPDF
@@ -33,7 +34,7 @@ from app.services.pptx_processor import (
     PptxProcessingError,
     analyze_pptx,
     get_pptx_slide_count,
-    is_pptx_file,
+    remove_pptx_manual_regions,
     remove_pptx_watermarks,
     render_pptx_slide_preview,
 )
@@ -45,7 +46,6 @@ from app.utils.document_store import DocumentRecord, analysis_store, detection_s
 from app.utils.file_validation import (
     FileValidationError,
     generate_document_id,
-    get_file_extension,
     safe_document_path,
     validate_upload,
 )
@@ -60,6 +60,48 @@ PREVIEW_DPI = 120
 
 def _api_error(status_code: int, code: str, message: str) -> HTTPException:
     return HTTPException(status_code=status_code, detail={"success": False, "error": {"code": code, "message": message}})
+
+
+def _get_document_record(document_id: str) -> DocumentRecord | None:
+    """Retrieve document from memory, recovering from disk if server restarted."""
+    record = document_store.get(document_id)
+    if record is not None:
+        return record
+
+    for ext in (".pptx", ".pdf"):
+        stored_candidate = settings.upload_path / f"{document_id}{ext}"
+        if stored_candidate.exists():
+            try:
+                size_bytes = stored_candidate.stat().st_size
+                mtime = stored_candidate.stat().st_mtime
+                uploaded_at = datetime.fromtimestamp(mtime, tz=timezone.utc)
+                if ext == ".pptx":
+                    page_count = get_pptx_slide_count(stored_candidate)
+                else:
+                    with fitz.open(stored_candidate) as doc:
+                        page_count = doc.page_count
+
+                result_candidate = settings.result_path / f"{document_id}{ext}"
+                has_result = result_candidate.exists()
+                result_path = str(result_candidate) if has_result else ""
+                status = "processed" if has_result else "uploaded"
+
+                recovered = DocumentRecord(
+                    document_id=document_id,
+                    original_filename=f"document{ext}",
+                    size_bytes=size_bytes,
+                    page_count=page_count,
+                    uploaded_at=uploaded_at,
+                    status=status,
+                    stored_path=str(stored_candidate),
+                    result_path=result_path,
+                )
+                document_store.add(recovered)
+                logger.info("recovered_document_from_disk job_id=%s ext=%s", document_id, ext)
+                return recovered
+            except Exception as exc:
+                logger.warning("failed_to_recover_document job_id=%s: %s", document_id, exc)
+    return None
 
 
 def _is_pptx(record: "DocumentRecord") -> bool:
@@ -128,6 +170,15 @@ async def upload_document(file: UploadFile = File(...)) -> DocumentUploadRespons
     if ext == ".pptx":
         try:
             page_count = get_pptx_slide_count(stored_path)
+            if page_count == 0:
+                stored_path.unlink(missing_ok=True)
+                raise _api_error(
+                    400,
+                    "INVALID_PPTX",
+                    "The uploaded file is not a readable PowerPoint presentation.",
+                )
+        except HTTPException:
+            raise
         except Exception as exc:
             stored_path.unlink(missing_ok=True)
             logger.warning("upload_unreadable_pptx job_id=%s: %s", document_id, exc)
@@ -189,7 +240,7 @@ async def upload_document(file: UploadFile = File(...)) -> DocumentUploadRespons
 
 @router.post("/{document_id}/analyze", response_model=DocumentAnalysisResponse)
 async def analyze_document_route(document_id: str) -> DocumentAnalysisResponse:
-    record = document_store.get(document_id)
+    record = _get_document_record(document_id)
     if record is None:
         raise _api_error(404, "DOCUMENT_NOT_FOUND", "No document was found with that ID.")
 
@@ -241,7 +292,7 @@ async def analyze_document_route(document_id: str) -> DocumentAnalysisResponse:
 
 @router.get("/{document_id}/progress")
 async def get_document_progress(document_id: str) -> dict:
-    record = document_store.get(document_id)
+    record = _get_document_record(document_id)
     if record is None:
         raise _api_error(404, "DOCUMENT_NOT_FOUND", "No document was found with that ID.")
 
@@ -276,7 +327,7 @@ async def get_document_progress(document_id: str) -> dict:
 
 @router.get("/{document_id}/status")
 async def get_document_status(document_id: str) -> dict:
-    record = document_store.get(document_id)
+    record = _get_document_record(document_id)
     if record is None:
         raise _api_error(404, "DOCUMENT_NOT_FOUND", "No document was found with that ID.")
 
@@ -291,7 +342,7 @@ async def get_document_status(document_id: str) -> dict:
 
 @router.post("/{document_id}/detect", response_model=DetectionResponse)
 async def detect_watermarks(document_id: str) -> DetectionResponse:
-    record = document_store.get(document_id)
+    record = _get_document_record(document_id)
     if record is None:
         raise _api_error(404, "DOCUMENT_NOT_FOUND", "No document was found with that ID.")
 
@@ -314,7 +365,7 @@ async def detect_watermarks(document_id: str) -> DetectionResponse:
 
 @router.post("/{document_id}/process", response_model=ProcessResponse)
 async def process_document(document_id: str, request: ProcessRequest) -> ProcessResponse:
-    record = document_store.get(document_id)
+    record = _get_document_record(document_id)
     if record is None:
         raise _api_error(404, "DOCUMENT_NOT_FOUND", "No document was found with that ID.")
 
@@ -345,6 +396,19 @@ async def process_document(document_id: str, request: ProcessRequest) -> Process
         pages_filter = set(request.selected_pages)
     else:
         pages_filter = None  # "all"
+
+    if pages_filter is not None:
+        invalid_pages = sorted(
+            page
+            for page in pages_filter
+            if page < 1 or page > (record.page_count or 0)
+        )
+        if invalid_pages:
+            raise _api_error(
+                400,
+                "INVALID_PAGE",
+                f"Selected pages must be between 1 and {record.page_count or 0}.",
+            )
 
     source_path = _current_source_path(record)
     is_ppt = _is_pptx(record)
@@ -429,17 +493,16 @@ def _safe_download_filename(original_filename: str, ext: str = ".pdf") -> str:
 
 @router.get("/{document_id}/download")
 async def download_document(document_id: str) -> FileResponse:
-    record = document_store.get(document_id)
+    record = _get_document_record(document_id)
     if record is None:
         raise _api_error(404, "DOCUMENT_NOT_FOUND", "No document was found with that ID.")
 
-    if not record.result_path:
-        raise _api_error(400, "NOT_PROCESSED", "This document has not been processed yet.")
+    download_target = record.result_path or record.stored_path
 
-    res_path = Path(record.result_path).resolve()
+    res_path = Path(download_target).resolve()
     allowed_dirs = [settings.result_path.resolve(), settings.upload_path.resolve()]
     if not any(res_path.is_relative_to(d) for d in allowed_dirs) or not res_path.exists():
-        logger.warning("unauthorized_path_access job_id=%s path=%s", document_id, record.result_path)
+        logger.warning("unauthorized_path_access job_id=%s path=%s", document_id, download_target)
         raise _api_error(404, "FILE_NOT_FOUND", "The requested document file could not be found.")
 
     is_ppt = _is_pptx(record)
@@ -459,12 +522,19 @@ async def download_document(document_id: str) -> FileResponse:
 
 @router.get("/{document_id}/preview/{page_number}")
 async def preview_page(document_id: str, page_number: int, version: str = "current") -> Response:
-    record = document_store.get(document_id)
+    record = _get_document_record(document_id)
     if record is None:
         raise _api_error(404, "DOCUMENT_NOT_FOUND", "No document was found with that ID.")
 
     if version not in ("current", "original"):
         raise _api_error(400, "INVALID_VERSION", "version must be 'current' or 'original'.")
+
+    if record.page_count is None or page_number < 1 or page_number > record.page_count:
+        raise _api_error(
+            400,
+            "INVALID_PAGE",
+            f"This document has {record.page_count or 0} pages.",
+        )
 
     source_path = Path(record.stored_path) if version == "original" else _current_source_path(record)
     source_resolved = source_path.resolve()
@@ -510,7 +580,7 @@ async def preview_page(document_id: str, page_number: int, version: str = "curre
 
 @router.post("/{document_id}/manual-remove", response_model=ManualRemovalResponse)
 async def manual_remove(document_id: str, request: ManualRemovalRequest) -> ManualRemovalResponse:
-    record = document_store.get(document_id)
+    record = _get_document_record(document_id)
     if record is None:
         raise _api_error(404, "DOCUMENT_NOT_FOUND", "No document was found with that ID.")
 
@@ -529,12 +599,6 @@ async def manual_remove(document_id: str, request: ManualRemovalRequest) -> Manu
         message="Applying intelligent manual removal...",
     )
 
-    try:
-        fresh_analysis = analyze_document(document_id, source_path)
-    except AnalysisError as exc:
-        raise _api_error(400, exc.code, exc.message) from exc
-    scanned_pages = scanned_page_xrefs(fresh_analysis)
-
     def on_manual_progress(current: int, total: int, msg: str) -> None:
         progress_store.update(
             document_id,
@@ -544,19 +608,36 @@ async def manual_remove(document_id: str, request: ManualRemovalRequest) -> Manu
             message=msg,
         )
 
+    is_ppt = _is_pptx(record)
+
     try:
-        cleaned_bytes, pages_affected = remove_manual_regions(
-            source_path,
-            request.regions,
-            request.apply_to_all_pages,
-            scanned_pages,
-            progress_callback=on_manual_progress,
-        )
-    except ManualRemovalError as exc:
+        if is_ppt:
+            cleaned_bytes, pages_affected = remove_pptx_manual_regions(
+                source_path,
+                request.regions,
+                request.apply_to_all_pages,
+                progress_callback=on_manual_progress,
+            )
+            result_path = settings.result_path / f"{document_id}.pptx"
+        else:
+            try:
+                fresh_analysis = analyze_document(document_id, source_path)
+            except AnalysisError as exc:
+                raise _api_error(400, exc.code, exc.message) from exc
+            scanned_pages = scanned_page_xrefs(fresh_analysis)
+
+            cleaned_bytes, pages_affected = remove_manual_regions(
+                source_path,
+                request.regions,
+                request.apply_to_all_pages,
+                scanned_pages,
+                progress_callback=on_manual_progress,
+            )
+            result_path = settings.result_path / f"{document_id}.pdf"
+    except (ManualRemovalError, PptxProcessingError) as exc:
         progress_store.update(document_id, stage="error", error=exc.message, message=exc.message)
         raise _api_error(400, exc.code, exc.message) from exc
 
-    result_path = settings.result_path / f"{document_id}.pdf"
     try:
         result_path.write_bytes(cleaned_bytes)
     except OSError as exc:
@@ -590,7 +671,7 @@ async def manual_remove(document_id: str, request: ManualRemovalRequest) -> Manu
 
 @router.post("/{document_id}/ocr", response_model=OcrResponse)
 async def ocr_document(document_id: str, request: OcrRequest) -> OcrResponse:
-    record = document_store.get(document_id)
+    record = _get_document_record(document_id)
     if record is None:
         raise _api_error(404, "DOCUMENT_NOT_FOUND", "No document was found with that ID.")
 
@@ -635,7 +716,7 @@ async def ocr_document(document_id: str, request: OcrRequest) -> OcrResponse:
 
 @router.delete("/{document_id}")
 async def delete_document_route(document_id: str) -> dict:
-    record = document_store.get(document_id)
+    record = _get_document_record(document_id)
     if record is None:
         raise _api_error(404, "DOCUMENT_NOT_FOUND", "No document was found with that ID.")
 

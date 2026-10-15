@@ -131,7 +131,8 @@ export function Home() {
   const hasCleanedResult =
     processingStatus === "success" ||
     manualStatus === "success" ||
-    (ocrStatus === "success" && (ocrResult?.pages_ocred.length ?? 0) > 0);
+    (ocrStatus === "success" && (ocrResult?.pages_ocred.length ?? 0) > 0) ||
+    (detectionStatus === "success" && (detection?.candidates.length ?? 0) === 0);
 
   const isIdle = fileMode === null && (status === "idle" || status === "uploading");
 
@@ -143,7 +144,7 @@ export function Home() {
       {/* Main Container */}
       <div className="mx-auto flex-1 w-full max-w-5xl px-4 py-8 sm:px-6 lg:px-8">
         {/* Breadcrumb */}
-        <nav aria-label="Breadcrumb" className="mb-6 flex items-center justify-center gap-2 text-xs font-medium text-slate-400">
+        <nav aria-label="Breadcrumb" className="mb-6 flex items-center justify-center gap-1.5 whitespace-nowrap text-xs font-medium text-slate-400 sm:gap-2">
           <a href="/" className="hover:text-brand-600 transition-colors">Home</a>
           <span>/</span>
           <span className="text-slate-700 font-semibold">Watermark Remover</span>
@@ -242,14 +243,23 @@ export function Home() {
                         </div>
                       </div>
                     </div>
-                    <button
-                      type="button"
-                      onClick={reset}
-                      className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-100 transition-colors"
-                    >
-                      <RotateCcw className="h-3.5 w-3.5" />
-                      Upload New
-                    </button>
+                    <div className="flex items-center gap-2">
+                      <a
+                        href={downloadUrl(result.document_id)}
+                        className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-600 px-4 py-2 text-xs font-bold text-white shadow-md shadow-emerald-600/20 hover:bg-emerald-700 transition-all"
+                      >
+                        <Download className="h-4 w-4" />
+                        Download Document
+                      </a>
+                      <button
+                        type="button"
+                        onClick={reset}
+                        className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-100 transition-colors"
+                      >
+                        <RotateCcw className="h-3.5 w-3.5" />
+                        Upload New
+                      </button>
+                    </div>
                   </div>
 
                   {/* Analysis Loading */}
@@ -373,9 +383,15 @@ export function Home() {
                   {processingStatus === "success" && processing && (
                     <div className="mt-6 rounded-2xl border border-emerald-200 bg-emerald-50/70 p-5">
                       <p className="text-sm font-bold text-emerald-900">Watermark Removal Complete!</p>
-                      <p className="mt-1 text-xs text-emerald-700">
-                        Successfully removed {processing.removed_count} watermark{processing.removed_count === 1 ? "" : "s"} across {processing.pages_affected.length} page(s)/slide(s).
-                      </p>
+                      {processing.skipped_candidate_ids.length > 0 ? (
+                        <p className="mt-1 text-xs text-amber-800">
+                          Processed {processing.pages_affected.length} page(s)/slide(s), but {processing.skipped_candidate_ids.length} selected candidate(s) could not be fully removed. Watermarks on shared slide masters or layouts can only be removed when all slides are selected.
+                        </p>
+                      ) : (
+                        <p className="mt-1 text-xs text-emerald-700">
+                          Successfully removed {processing.removed_count} watermark{processing.removed_count === 1 ? "" : "s"} across {processing.pages_affected.length} page(s)/slide(s).
+                        </p>
+                      )}
                     </div>
                   )}
 
@@ -437,27 +453,25 @@ export function Home() {
                     </div>
                   )}
 
-                  {/* Download CTA */}
-                  {hasCleanedResult && (
-                    <div className="mt-6 flex flex-wrap items-center gap-4">
-                      <a
-                        href={downloadUrl(result.document_id)}
-                        className="inline-flex items-center gap-2.5 rounded-2xl bg-gradient-to-r from-emerald-600 to-emerald-500 px-7 py-3.5 text-sm font-bold text-white shadow-lg shadow-emerald-500/25 hover:from-emerald-700 hover:to-emerald-600 hover:scale-[1.01] transition-all"
-                      >
-                        <Download className="h-5 w-5" />
-                        Download Cleaned Document
-                      </a>
+                  {/* Download CTA — Always visible when document is ready */}
+                  <div className="mt-8 border-t border-slate-100 pt-6 flex flex-wrap items-center gap-4">
+                    <a
+                      href={downloadUrl(result.document_id)}
+                      className="inline-flex items-center gap-2.5 rounded-2xl bg-gradient-to-r from-emerald-600 to-emerald-500 px-7 py-3.5 text-sm font-bold text-white shadow-lg shadow-emerald-500/25 hover:from-emerald-700 hover:to-emerald-600 hover:scale-[1.01] transition-all"
+                    >
+                      <Download className="h-5 w-5" />
+                      Download Cleaned Document
+                    </a>
 
-                      <button
-                        type="button"
-                        onClick={reset}
-                        className="inline-flex items-center gap-2 rounded-2xl border border-slate-200 bg-white px-5 py-3 text-sm font-semibold text-slate-700 hover:bg-slate-50 transition-all"
-                      >
-                        <RotateCcw className="h-4 w-4" />
-                        Clean Another File
-                      </button>
-                    </div>
-                  )}
+                    <button
+                      type="button"
+                      onClick={reset}
+                      className="inline-flex items-center gap-2 rounded-2xl border border-slate-200 bg-white px-5 py-3 text-sm font-semibold text-slate-700 hover:bg-slate-50 transition-all"
+                    >
+                      <RotateCcw className="h-4 w-4" />
+                      Clean Another File
+                    </button>
+                  </div>
                 </div>
               )}
             </>

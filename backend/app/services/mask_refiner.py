@@ -202,7 +202,7 @@ def refine_vector_regions(
         expanded_x0, expanded_y0 = rx0, ry0
         expanded_x1, expanded_y1 = rx1, ry1
 
-        # Check overlapping text spans
+        # Check overlapping text spans: only snap if the selection covers almost the entire span
         for tx0, ty0, tx1, ty1 in text_spans:
             ix0 = max(rx0, tx0)
             iy0 = max(ry0, ty0)
@@ -212,30 +212,14 @@ def refine_vector_regions(
             if ix1 > ix0 and iy1 > iy0:
                 span_area = max(1.0, (tx1 - tx0) * (ty1 - ty0))
                 inter_area = (ix1 - ix0) * (iy1 - iy0)
-                # If guidance overlaps >= 20% of text span or span center is inside
-                span_cx = (tx0 + tx1) / 2
-                span_cy = (ty0 + ty1) / 2
-                if (inter_area / span_area >= 0.20) or (rx0 <= span_cx <= rx1 and ry0 <= span_cy <= ry1):
+                # Only expand if selection covers >= 85% of the text span to avoid swallowing adjacent text
+                if inter_area / span_area >= 0.85:
                     expanded_x0 = min(expanded_x0, tx0)
                     expanded_y0 = min(expanded_y0, ty0)
                     expanded_x1 = max(expanded_x1, tx1)
                     expanded_y1 = max(expanded_y1, ty1)
 
-        # Check overlapping small overlay images
-        for ix0_img, iy0_img, ix1_img, iy1_img in image_bboxes:
-            img_area = (ix1_img - ix0_img) * (iy1_img - iy0_img)
-            if img_area < (page_w * page_h * 0.4):  # small/moderate overlay
-                ix0 = max(rx0, ix0_img)
-                iy0 = max(ry0, iy0_img)
-                ix1 = min(rx1, ix1_img)
-                iy1 = min(ry1, iy1_img)
-                if ix1 > ix0 and iy1 > iy0:
-                    inter_area = (ix1 - ix0) * (iy1 - iy0)
-                    if inter_area / img_area >= 0.25:
-                        expanded_x0 = min(expanded_x0, ix0_img)
-                        expanded_y0 = min(expanded_y0, iy0_img)
-                        expanded_x1 = max(expanded_x1, ix1_img)
-                        expanded_y1 = max(expanded_y1, iy1_img)
+        # Never expand over embedded photos or diagrams — preserve user's target bounds
 
         # Convert back to fractional coordinates
         refined_regions.append((

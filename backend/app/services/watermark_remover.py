@@ -105,6 +105,33 @@ def remove_candidates(
                     page.add_redact_annot(rect, fill=None)
                     has_image_redact = True
 
+                # Also check if any selected text watermark is a mobile scanner (e.g. CamScanner)
+                # and clean up its accompanying corner logo image if present on the page
+                scanner_watermark_selected = any(
+                    any(term in c.text.lower() for term in ("camscanner", "scanned with", "adobe scan", "clearscanner"))
+                    for c in text_candidates
+                )
+                if scanner_watermark_selected:
+                    page_area = page.rect.width * page.rect.height
+                    for img_info in page.get_images(full=True):
+                        try:
+                            img_rects = page.get_image_rects(img_info[0])
+                            for r in img_rects:
+                                r_area = r.width * r.height
+                                cov = r_area / page_area if page_area > 0 else 0
+                                # Small corner logo image
+                                if cov < 0.05:
+                                    r_x1_frac = r.x1 / page.rect.width
+                                    r_y1_frac = r.y1 / page.rect.height
+                                    r_x0_frac = r.x0 / page.rect.width
+                                    r_y0_frac = r.y0 / page.rect.height
+                                    # Located in footer corner
+                                    if (r_y1_frac >= 0.80) and (r_x0_frac <= 0.35 or r_x1_frac >= 0.65):
+                                        page.add_redact_annot(r, fill=None)
+                                        has_image_redact = True
+                        except Exception:
+                            pass
+
                 if has_text_redact or has_image_redact:
                     page.apply_redactions(
                         images=fitz.PDF_REDACT_IMAGE_REMOVE if has_image_redact else fitz.PDF_REDACT_IMAGE_NONE,

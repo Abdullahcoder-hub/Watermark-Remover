@@ -17,9 +17,14 @@ function confidenceLabel(confidence: number): { label: string; className: string
 export function CandidateList({ candidates, selectedIds, onToggle }: CandidateListProps) {
   if (candidates.length === 0) {
     return (
-      <div className="mt-4 flex items-start gap-2 rounded-xl bg-ink/[0.03] p-4 text-sm text-ink/60">
-        <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
-        <p>No watermark candidates were detected automatically. You can still select an area manually below if something's visible.</p>
+      <div className="mt-4 flex items-start gap-3 rounded-2xl bg-emerald-50/70 border border-emerald-200/80 p-4 text-sm text-emerald-800">
+        <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-emerald-600" aria-hidden="true" />
+        <div>
+          <p className="font-semibold text-emerald-900">No active watermarks detected</p>
+          <p className="mt-0.5 text-xs text-emerald-700">
+            This document appears clean and ready to download! If you still notice an unwanted mark, use the manual area selection below.
+          </p>
+        </div>
       </div>
     );
   }
