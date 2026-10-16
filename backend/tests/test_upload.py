@@ -29,6 +29,13 @@ def test_health_check() -> None:
         assert response.json()["status"] == "ok"
 
 
+def test_health_check_accepts_head() -> None:
+    for path in ("/api/v1/health", "/health", "/"):
+        response = client.head(path)
+        assert response.status_code == 200
+        assert response.content == b""
+
+
 def test_upload_valid_pdf() -> None:
     files = {"file": ("sample.pdf", io.BytesIO(MINIMAL_PDF), "application/pdf")}
     response = client.post("/api/v1/documents/upload", files=files)
