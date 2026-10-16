@@ -23,7 +23,7 @@ MINIMAL_PDF = (
 
 
 def test_health_check() -> None:
-    for path in ("/api/v1/health", "/"):
+    for path in ("/api/v1/health", "/health", "/"):
         response = client.get(path)
         assert response.status_code == 200
         assert response.json()["status"] == "ok"

@@ -9,13 +9,20 @@ import io
 import tempfile
 import zipfile
 import xml.etree.ElementTree as ET
+from types import SimpleNamespace
 from fastapi.testclient import TestClient
+
+import pymupdf as fitz
 
 from app.main import app
 from app.schemas.analysis import DocumentAnalysisResponse, PageAnalysis, TextObject
 from app.schemas.manual import ManualRegion
 from app.schemas.watermark import WatermarkCandidate
-from app.services.pptx_processor import remove_pptx_manual_regions, remove_pptx_watermarks
+from app.services.pptx_processor import (
+    remove_pptx_manual_regions,
+    remove_pptx_watermarks,
+    render_pptx_slide_preview,
+)
 from app.services.watermark_detector import generate_candidates
 
 client = TestClient(app)
@@ -299,6 +306,35 @@ def test_pptx_slide_preview() -> None:
     assert preview_resp.status_code == 200
     assert preview_resp.headers["content-type"] == "image/jpeg"
     assert len(preview_resp.content) > 100
+
+
+def test_pptx_slide_preview_uses_office_conversion_cache(tmp_path: Path, monkeypatch) -> None:
+    source_path = tmp_path / "presentation.pptx"
+    source_path.write_bytes(_build_test_pptx())
+    cache_path = tmp_path / "presentation.preview.pdf"
+
+    pdf = fitz.open()
+    pdf.new_page(width=960, height=540)
+    pdf_bytes = pdf.tobytes()
+    pdf.close()
+
+    def fake_office_run(command: list[str], **_kwargs) -> SimpleNamespace:
+        output_dir = Path(command[command.index("--outdir") + 1])
+        (output_dir / "presentation.pdf").write_bytes(pdf_bytes)
+        return SimpleNamespace(returncode=0, stderr="")
+
+    monkeypatch.setattr("app.services.pptx_processor.shutil.which", lambda _name: "soffice")
+    monkeypatch.setattr("app.services.pptx_processor.subprocess.run", fake_office_run)
+
+    rendered = render_pptx_slide_preview(source_path, 1, cache_path)
+    assert rendered.startswith(b"\xff\xd8\xff")
+    assert cache_path.is_file()
+
+    def unexpected_conversion(*_args, **_kwargs):
+        raise AssertionError("Cached PDF should avoid a second Office conversion")
+
+    monkeypatch.setattr("app.services.pptx_processor.subprocess.run", unexpected_conversion)
+    assert render_pptx_slide_preview(source_path, 1, cache_path) == rendered
 
 
 def test_pptx_preview_rejects_out_of_range_slide() -> None:

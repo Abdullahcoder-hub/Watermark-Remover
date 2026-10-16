@@ -17,6 +17,7 @@ from pathlib import Path
 import pymupdf as fitz
 from fastapi import APIRouter, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse, Response
+from starlette.concurrency import run_in_threadpool
 
 from app.config import settings
 from app.schemas.analysis import DocumentAnalysisResponse
@@ -555,7 +556,13 @@ async def preview_page(document_id: str, page_number: int, version: str = "curre
 
     if is_ppt:
         try:
-            image_bytes = render_pptx_slide_preview(source_path, page_number)
+            office_pdf_cache = settings.result_path / f"{document_id}.{version}.preview.pdf"
+            image_bytes = await run_in_threadpool(
+                render_pptx_slide_preview,
+                source_path,
+                page_number,
+                office_pdf_cache,
+            )
         except Exception as exc:
             logger.error("preview_failed_pptx job_id=%s slide=%s: %s", document_id, page_number, exc)
             raise _api_error(500, "PREVIEW_FAILED", "This PowerPoint slide could not be rendered.") from exc

@@ -10,6 +10,9 @@ import io
 import logging
 import os
 import re
+import shutil
+import subprocess
+import tempfile
 import zipfile
 import xml.etree.ElementTree as ET
 from collections import defaultdict
@@ -17,6 +20,7 @@ from pathlib import Path
 from typing import Callable
 
 from PIL import Image, ImageDraw, ImageFont
+import pymupdf as fitz
 
 from app.schemas.analysis import DocumentAnalysisResponse, ImageObject, PageAnalysis, TextObject
 from app.schemas.manual import ManualRegion
@@ -884,7 +888,110 @@ def _wrap_text_to_width(
     return lines
 
 
-def render_pptx_slide_preview(source_path: Path, slide_number: int) -> bytes:
+def render_pptx_slide_preview(
+    source_path: Path,
+    slide_number: int,
+    pdf_cache_path: Path | None = None,
+) -> bytes:
+    """Render a slide with LibreOffice to preserve PowerPoint layout and typography."""
+    office_binary = shutil.which("soffice") or shutil.which("libreoffice")
+    if office_binary is None:
+        logger.warning("libreoffice_not_available_using_approximate_pptx_preview")
+        return _render_pptx_slide_preview_fallback(source_path, slide_number)
+
+    try:
+        source_mtime_ns = source_path.stat().st_mtime_ns
+        if (
+            pdf_cache_path is not None
+            and pdf_cache_path.is_file()
+            and pdf_cache_path.stat().st_mtime_ns >= source_mtime_ns
+        ):
+            pdf_bytes = pdf_cache_path.read_bytes()
+        else:
+            with tempfile.TemporaryDirectory(prefix="watermark-remover-pptx-") as temp_dir:
+                temp_path = Path(temp_dir)
+                profile_path = (temp_path / "lo-profile").as_uri()
+                command = [
+                    office_binary,
+                    f"-env:UserInstallation={profile_path}",
+                    "--headless",
+                    "--nologo",
+                    "--nodefault",
+                    "--nolockcheck",
+                    "--convert-to",
+                    "pdf:impress_pdf_Export",
+                    "--outdir",
+                    str(temp_path),
+                    str(source_path.resolve()),
+                ]
+                result = subprocess.run(
+                    command,
+                    capture_output=True,
+                    text=True,
+                    timeout=90,
+                    check=False,
+                )
+                generated_pdf = temp_path / f"{source_path.stem}.pdf"
+                if result.returncode != 0 or not generated_pdf.is_file():
+                    logger.error(
+                        "libreoffice_pptx_conversion_failed exit_code=%s stderr=%s",
+                        result.returncode,
+                        result.stderr.strip(),
+                    )
+                    raise PptxProcessingError(
+                        "PREVIEW_FAILED",
+                        "The PowerPoint slide could not be converted for preview.",
+                    )
+                pdf_bytes = generated_pdf.read_bytes()
+
+            if pdf_cache_path is not None:
+                temp_cache_path: Path | None = None
+                try:
+                    pdf_cache_path.parent.mkdir(parents=True, exist_ok=True)
+                    with tempfile.NamedTemporaryFile(
+                        dir=pdf_cache_path.parent,
+                        prefix=f"{pdf_cache_path.name}.",
+                        suffix=".tmp",
+                        delete=False,
+                    ) as temp_cache_file:
+                        temp_cache_path = Path(temp_cache_file.name)
+                        temp_cache_file.write(pdf_bytes)
+                    temp_cache_path.replace(pdf_cache_path)
+                except OSError:
+                    logger.warning("pptx_preview_pdf_cache_write_failed path=%s", pdf_cache_path)
+                    if temp_cache_path is not None:
+                        try:
+                            temp_cache_path.unlink(missing_ok=True)
+                        except OSError:
+                            logger.warning("pptx_preview_temp_cache_delete_failed path=%s", temp_cache_path)
+
+        with fitz.open(stream=pdf_bytes, filetype="pdf") as pdf:
+            if slide_number < 1 or slide_number > pdf.page_count:
+                raise PptxProcessingError(
+                    "INVALID_PAGE",
+                    f"This presentation has {pdf.page_count} slides.",
+                )
+            page = pdf[slide_number - 1]
+            scale = 120.0 / 72.0
+            pixmap = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
+            return pixmap.tobytes("jpg", jpg_quality=90)
+    except PptxProcessingError:
+        raise
+    except subprocess.TimeoutExpired as exc:
+        logger.error("libreoffice_pptx_conversion_timeout path=%s", source_path)
+        raise PptxProcessingError(
+            "PREVIEW_TIMEOUT",
+            "The PowerPoint preview took too long to render. Please try again.",
+        ) from exc
+    except Exception as exc:
+        logger.exception("libreoffice_pptx_preview_failed path=%s", source_path)
+        raise PptxProcessingError(
+            "PREVIEW_FAILED",
+            "The PowerPoint slide could not be rendered for preview.",
+        ) from exc
+
+
+def _render_pptx_slide_preview_fallback(source_path: Path, slide_number: int) -> bytes:
     """
     Render a slide preview as a high-quality JPEG image.
     Accurately extracts slide text with actual font sizes, typography,
@@ -1097,13 +1204,8 @@ def render_pptx_slide_preview(source_path: Path, slide_number: int) -> bytes:
     except PptxProcessingError:
         raise
     except Exception as exc:
-        logger.warning("render_pptx_slide_preview fallback: %s", exc)
-        img = Image.new("RGB", (1280, 720), (248, 250, 252))
-        draw = ImageDraw.Draw(img)
-        draw.rectangle([20, 20, 1260, 700], fill=(255, 255, 255), outline=(200, 210, 220), width=2)
-        default_font = _get_font("arial", 24, bold=True)
-        draw.text((60, 60), f"PowerPoint Slide {slide_number}", font=default_font, fill=(30, 41, 59))
-        draw.text((60, 110), "Preview generated", font=_get_font("arial", 16), fill=(100, 116, 139))
-        out_io = io.BytesIO()
-        img.save(out_io, format="JPEG", quality=85)
-        return out_io.getvalue()
+        logger.exception("render_pptx_slide_preview_failed slide=%s", slide_number)
+        raise PptxProcessingError(
+            "PREVIEW_FAILED",
+            "The PowerPoint slide preview could not be rendered.",
+        ) from exc

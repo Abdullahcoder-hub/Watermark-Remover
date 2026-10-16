@@ -1,5 +1,5 @@
 import { ChevronLeft, ChevronRight, Loader2, ZoomIn, ZoomOut } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 
 import { previewUrl } from "../services/api";
 
@@ -13,22 +13,14 @@ const ZOOM_LEVELS = [1, 1.5, 2];
 export function BeforeAfterView({ documentId, pageCount }: BeforeAfterViewProps) {
   const [currentPage, setCurrentPage] = useState(1);
   const [zoomIndex, setZoomIndex] = useState(0);
-  const [loadedCount, setLoadedCount] = useState(0);
-  // Bumped whenever the page changes, so the loading state resets and
-  // we don't briefly show the previous page's images mid-swap.
-  const [renderKey, setRenderKey] = useState(0);
-
-  useEffect(() => {
-    setLoadedCount(0);
-    setRenderKey((k) => k + 1);
-  }, [currentPage]);
+  const [retryToken, setRetryToken] = useState(0);
+  const [imageStates, setImageStates] = useState<Record<string, "loaded" | "error">>({});
 
   const goToPage = (page: number) => {
     if (page >= 1 && page <= pageCount) setCurrentPage(page);
   };
 
   const zoom = ZOOM_LEVELS[zoomIndex];
-  const bothLoaded = loadedCount >= 2;
 
   return (
     <div className="mt-4 rounded-2xl border border-ink/10 bg-white p-4">
@@ -90,21 +82,45 @@ export function BeforeAfterView({ documentId, pageCount }: BeforeAfterViewProps)
             <p className="mb-1.5 text-xs font-medium uppercase tracking-wide text-ink/40">
               {version === "original" ? "Before" : "After"}
             </p>
-            <div className="relative overflow-auto rounded-xl border border-ink/10 bg-ink/[0.03]" style={{ maxHeight: "70vh" }}>
-              {!bothLoaded && (
-                <div className="flex h-64 w-full items-center justify-center text-ink/30">
-                  <Loader2 className="h-6 w-6 animate-spin" aria-hidden="true" />
+            {(() => {
+              const imageKey = `${documentId}-${currentPage}-${version}-${retryToken}`;
+              const imageState = imageStates[imageKey];
+              return (
+                <div className="relative min-h-64 overflow-auto rounded-xl border border-ink/10 bg-ink/[0.03]" style={{ maxHeight: "70vh" }}>
+                  {imageState !== "loaded" && (
+                    <div className="absolute inset-0 z-10 flex min-h-64 items-center justify-center bg-white/80 text-ink/40">
+                      {imageState === "error" ? (
+                        <div className="flex flex-col items-center gap-2 p-4 text-center text-sm">
+                          <span>Could not load this slide preview.</span>
+                          <button
+                            type="button"
+                            className="rounded-lg border border-ink/10 px-3 py-1.5 font-medium text-ink hover:bg-ink/5"
+                            onClick={() => setRetryToken((token) => token + 1)}
+                          >
+                            Try again
+                          </button>
+                        </div>
+                      ) : (
+                        <Loader2 className="h-6 w-6 animate-spin" aria-hidden="true" />
+                      )}
+                    </div>
+                  )}
+                  <img
+                    key={imageKey}
+                    src={previewUrl(documentId, currentPage, version, retryToken || undefined)}
+                    alt={`Page ${currentPage}, ${version === "original" ? "before" : "after"} cleanup`}
+                    className={`block ${imageState === "error" ? "invisible" : ""}`}
+                    style={{ width: `${zoom * 100}%`, maxWidth: "none" }}
+                    onLoad={() =>
+                      setImageStates((states) => ({ ...states, [imageKey]: "loaded" }))
+                    }
+                    onError={() =>
+                      setImageStates((states) => ({ ...states, [imageKey]: "error" }))
+                    }
+                  />
                 </div>
-              )}
-              <img
-                key={`${version}-${renderKey}`}
-                src={previewUrl(documentId, currentPage, version)}
-                alt={`Page ${currentPage}, ${version === "original" ? "before" : "after"} cleanup`}
-                className={bothLoaded ? "block" : "hidden"}
-                style={{ width: `${zoom * 100}%`, maxWidth: "none" }}
-                onLoad={() => setLoadedCount((c) => c + 1)}
-              />
-            </div>
+              );
+            })()}
           </div>
         ))}
       </div>

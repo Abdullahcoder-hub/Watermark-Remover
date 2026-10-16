@@ -19,6 +19,7 @@ import logging
 from datetime import timedelta
 from pathlib import Path
 
+from app.config import settings
 from app.utils.document_store import (
     DocumentRecord,
     analysis_store,
@@ -48,6 +49,9 @@ def delete_document(record: DocumentRecord) -> None:
     """Remove one document's files, caches, and store entry entirely."""
     _delete_file_if_exists(record.stored_path)
     _delete_file_if_exists(record.result_path)
+    for version in ("original", "current"):
+        preview_pdf = settings.result_path / f"{record.document_id}.{version}.preview.pdf"
+        _delete_file_if_exists(str(preview_pdf))
     analysis_store.delete(record.document_id)
     detection_store.delete(record.document_id)
     preview_cache.delete_document(record.document_id)
@@ -94,8 +98,6 @@ def cleanup_expired_documents(retention_minutes: int) -> int:
     window, both from in-memory stores and orphaned files on disk.
     Returns total count of removed records.
     """
-    from app.config import settings
-
     cutoff = utcnow() - timedelta(minutes=retention_minutes)
     expired = document_store.all_older_than(cutoff)
     for record in expired:

@@ -8,6 +8,9 @@ WORKDIR /app
 # app needs to OCR other languages.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libgl1 \
+    libreoffice-impress \
+    fonts-crosextra-carlito \
+    fonts-liberation \
     tesseract-ocr \
     tesseract-ocr-eng \
     && rm -rf /var/lib/apt/lists/*
